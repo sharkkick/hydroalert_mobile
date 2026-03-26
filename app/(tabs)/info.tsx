@@ -20,13 +20,6 @@ const LOCATIONS = [
       { id: 'S-004', spot: 'Near Perimeter Road',             water: 1.8, rainfall: 3,  status: 'normal'   },
     ],
   },
-  {
-    barangay: 'Brgy. Malagasang I-G',
-    area: 'Imus, Cavite',
-    sensors: [
-      { id: 'S-005', spot: 'Canal Entry Point',               water: 3.5, rainfall: 15, status: 'warning'  },
-    ],
-  },
 ];
 
 const STATUS = {

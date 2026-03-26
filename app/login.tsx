@@ -5,15 +5,15 @@ import {
   KeyboardAvoidingView, Platform, ScrollView,
   Dimensions, ActivityIndicator,
 } from 'react-native';
-import { router }                          from 'expo-router';
-import { Ionicons }                        from '@expo/vector-icons';
-import { signInWithEmailAndPassword,
-         sendPasswordResetEmail }          from 'firebase/auth';
-import { auth }                            from './firebase';
+import { router } from 'expo-router';
+import { Ionicons } from '@expo/vector-icons';
+import { signInWithEmailAndPassword, sendPasswordResetEmail } from 'firebase/auth';
+import { auth, db } from './firebase';
+import { doc, getDoc } from 'firebase/firestore';
+import { useApp } from './AppContext';
 
 const { width } = Dimensions.get('window');
 
-// ── Map Firebase error codes to friendly messages ────────────────────────────
 function firebaseErrorMessage(code: string): string {
   switch (code) {
     case 'auth/user-not-found':
@@ -35,14 +35,14 @@ function firebaseErrorMessage(code: string): string {
 }
 
 export default function LoginScreen() {
-  const [email,        setEmail]        = useState('');
-  const [password,     setPassword]     = useState('');
+  const [email, setEmail] = useState('');
+  const [password, setPassword] = useState('');
   const [showPassword, setShowPassword] = useState(false);
-  const [error,        setError]        = useState('');
-  const [success,      setSuccess]      = useState('');
-  const [loading,      setLoading]      = useState(false);
+  const [error, setError] = useState('');
+  const [success, setSuccess] = useState('');
+  const [loading, setLoading] = useState(false);
+  const { setUser, logActivity } = useApp();
 
-  // ── Sign In ─────────────────────────────────────────────────────────────────
   const handleLogin = async () => {
     setError('');
     if (!email.trim() || !password) {
@@ -51,8 +51,45 @@ export default function LoginScreen() {
     }
     setLoading(true);
     try {
-      await signInWithEmailAndPassword(auth, email.trim(), password);
-      // onAuthStateChanged in _layout.tsx handles the redirect automatically
+      const userCredential = await signInWithEmailAndPassword(auth, email.trim(), password);
+      const uid = userCredential.user.uid;
+
+      // Fetch user profile from Firestore
+      const userDocRef = doc(db, 'users', uid);
+      const userDocSnap = await getDoc(userDocRef);
+
+      if (userDocSnap.exists()) {
+        const userData = userDocSnap.data();
+        // Update AppContext with user data from Firestore
+        setUser({
+          firstName: userData.firstName || '',
+          middleName: userData.middleName || '',
+          lastName: userData.lastName || '',
+          email: userData.email || email.trim(),
+          phone: userData.phone || '',
+          city: userData.city || '',
+          barangay: userData.barangay || '',
+        });
+      } else {
+        // User doc doesn't exist yet, at least set the email
+        setUser({
+          firstName: '',
+          middleName: '',
+          lastName: '',
+          email: email.trim(),
+          phone: '',
+          city: '',
+          barangay: '',
+        });
+      }
+
+      // Log login activity to Firestore
+      logActivity({
+        type: 'login',
+        title: 'Logged In',
+        description: 'Successfully signed in to HydroAlert',
+      });
+
       router.replace('/(tabs)');
     } catch (err: any) {
       setError(firebaseErrorMessage(err.code));
@@ -61,7 +98,6 @@ export default function LoginScreen() {
     }
   };
 
-  // ── Forgot Password ─────────────────────────────────────────────────────────
   const handleForgotPassword = async () => {
     if (!email.trim()) {
       setError('Please enter your email address first, then tap Forgot Password.');

@@ -1,4 +1,4 @@
-import { View, Text, StyleSheet, ScrollView, TouchableOpacity, Alert, Dimensions, Animated } from 'react-native';
+import { View, Text, StyleSheet, ScrollView, TouchableOpacity, Alert, Dimensions, Animated, Modal } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
 import { useState, useRef } from 'react';
 import { useApp } from '../AppContext';
@@ -27,6 +27,8 @@ export default function SOSScreen() {
   const [selectedPeople, setSelectedPeople]         = useState<string | null>(null);
   const [selectedSituation, setSelectedSituation]   = useState<string | null>(null);
   const [showSituationDropdown, setShowSituationDropdown] = useState(false);
+  const [showConfirmModal, setShowConfirmModal]           = useState(false);
+  const [updateSent,       setUpdateSent]                 = useState(false);
 
   // ── One-time SOS lock ──────────────────────────────────────────────────
   const [sosPressed, setSosPressed]   = useState(false); // true = already sent
@@ -70,12 +72,13 @@ export default function SOSScreen() {
     );
   };
 
-  // Update alert details without re-sending a new SOS
+  // Update alert details — shows confirmation modal first
   const handleSendDetailed = () => {
-    if (!selectedPeople) {
-      Alert.alert('Required', 'Please select how many people need rescue.');
-      return;
-    }
+    setShowConfirmModal(true);
+  };
+
+  const handleConfirmUpdate = () => {
+    setShowConfirmModal(false);
     const id = Date.now().toString();
     addAlert({
       id,
@@ -91,60 +94,65 @@ export default function SOSScreen() {
       title: 'Alert Updated',
       description: `Updated SOS details: ${selectedPeople} people${selectedSituation ? ` — ${selectedSituation}` : ''}`,
     });
-    Alert.alert('✅ Details Updated', 'Rescue teams have been notified with your updated details.');
+    // Reset details after sending so resident can submit fresh update
+    setSelectedPeople(null);
+    setSelectedSituation(null);
+    setShowDetails(false);
+    // Show "Details Updated" badge — stays until next update is sent
+    setUpdateSent(true);
   };
 
   return (
     <ScrollView style={s.container} contentContainerStyle={s.scroll} showsVerticalScrollIndicator={false}>
 
-      {/* Emergency Banner */}
+      {/* Header Banner */}
       <View style={s.banner}>
         <View style={s.bannerIcon}>
-          <Ionicons name="warning" size={26} color="#ffffff" />
+          <Ionicons name="shield-checkmark-outline" size={24} color="#ffffff" />
         </View>
         <View style={s.bannerText}>
-          <Text style={s.bannerTitle}>EMERGENCY RESCUE REQUEST</Text>
-          <Text style={s.bannerSub}>Use this only if you or others are trapped and need immediate rescue</Text>
+          <Text style={s.bannerTitle}>Emergency Rescue Request</Text>
+          <Text style={s.bannerSub}>Use this only if you or others need immediate rescue assistance</Text>
         </View>
       </View>
 
       {/* SOS Button Card */}
       <View style={s.sosCard}>
 
-        {/* Big SOS Button — disabled after first press */}
-        <Animated.View style={{ transform: [{ scale: scaleAnim }], alignItems: 'center' }}>
+        {/* Rectangle SOS Button */}
+        <Animated.View style={{ transform: [{ scale: scaleAnim }], width: '100%' }}>
           <TouchableOpacity
             style={[s.sosButton, sosPressed && s.sosButtonSent]}
             onPress={handleSOSPress}
             activeOpacity={sosPressed ? 1 : 0.85}
-            disabled={sosPressed}          // ← prevents any further tap events
+            disabled={sosPressed}
           >
-            <View style={s.sosInner}>
-              {sosPressed ? (
-                // Show checkmark once sent
-                <Ionicons name="checkmark" size={80} color="#ffffff" />
-              ) : (
-                <Ionicons name="warning" size={72} color="#ffffff" />
-              )}
-            </View>
+            <Ionicons
+              name={sosPressed ? 'checkmark-circle-outline' : 'alert-circle-outline'}
+              size={22}
+              color={sosPressed ? '#16a34a' : '#ffffff'}
+            />
+            <Text style={[s.sosButtonText, sosPressed && s.sosButtonTextSent]}>
+              {sosPressed ? 'SOS Sent' : 'Send Emergency Alert'}
+            </Text>
           </TouchableOpacity>
         </Animated.View>
 
-        {/* Status label under button */}
-        {sosPressed ? (
-          <View style={s.sosSentBadge}>
-            <Ionicons name="checkmark-circle" size={16} color="#16a34a" />
-            <Text style={s.sosSentText}>SOS Sent — Location shared with rescue teams</Text>
-          </View>
-        ) : (
-          <Text style={s.sosTapHint}>Tap to send emergency alert</Text>
-        )}
+        {/* Status label under button — hidden since card shows status */}
 
         {/* One-time lock notice */}
         {sosPressed && (
           <View style={s.lockNotice}>
             <Ionicons name="lock-closed-outline" size={14} color="#6b7280" />
             <Text style={s.lockText}>Button locked to prevent duplicate alerts. You can still update your details below.</Text>
+          </View>
+        )}
+
+        {/* Update sent confirmation badge */}
+        {updateSent && (
+          <View style={s.updateSentBadge}>
+            <Ionicons name="checkmark-circle" size={16} color="#16a34a" />
+            <Text style={s.updateSentText}>Details updated — rescue teams have been notified</Text>
           </View>
         )}
 
@@ -174,7 +182,7 @@ export default function SOSScreen() {
                 <TouchableOpacity
                   key={opt}
                   style={[s.peopleBtn, selectedPeople === opt && s.peopleBtnSelected]}
-                  onPress={() => setSelectedPeople(opt)}
+                  onPress={() => { setSelectedPeople(opt); setUpdateSent(false); }}
                   activeOpacity={0.7}
                 >
                   <Ionicons
@@ -218,20 +226,74 @@ export default function SOSScreen() {
 
             <Text style={s.detailHint}>Be specific: building type, floor level, landmarks nearby</Text>
 
-            {/* Update details button — label changes after first send */}
-            <TouchableOpacity
-              style={[s.sendBtn, !selectedPeople && s.sendBtnDisabled]}
-              onPress={handleSendDetailed}
-              activeOpacity={0.85}
-            >
-              <Ionicons name={sosPressed ? 'refresh' : 'send'} size={16} color={selectedPeople ? '#ffffff' : '#9ca3af'} />
-              <Text style={[s.sendBtnText, !selectedPeople && s.sendBtnTextDisabled]}>
-                {sosPressed ? 'UPDATE DETAILS' : 'SEND DETAILED REQUEST'}
-              </Text>
-            </TouchableOpacity>
+            {/* Update details button — only enabled when people AND situation are both selected */}
+            {(() => {
+              const canSend = !!selectedPeople && !!selectedSituation;
+              return (
+                <TouchableOpacity
+                  style={[s.sendBtn, !canSend && s.sendBtnDisabled]}
+                  onPress={canSend ? handleSendDetailed : undefined}
+                  activeOpacity={canSend ? 0.85 : 1}
+                >
+                  <Ionicons name={sosPressed ? 'refresh' : 'send'} size={16} color={canSend ? '#ffffff' : '#9ca3af'} />
+                  <Text style={[s.sendBtnText, !canSend && s.sendBtnTextDisabled]}>
+                    {sosPressed ? 'UPDATE DETAILS' : 'SEND DETAILED REQUEST'}
+                  </Text>
+                </TouchableOpacity>
+              );
+            })()}
           </View>
         )}
       </View>
+
+      {/* Confirmation Modal */}
+      <Modal
+        visible={showConfirmModal}
+        transparent
+        animationType="fade"
+        onRequestClose={() => setShowConfirmModal(false)}
+      >
+        <View style={s.modalOverlay}>
+          <View style={s.modalCard}>
+            <View style={s.modalIconWrap}>
+              <Ionicons name="send-outline" size={28} color="#2563eb" />
+            </View>
+            <Text style={s.modalTitle}>Update rescue details?</Text>
+            <Text style={s.modalBody}>
+              You are about to send updated details to rescue teams:
+            </Text>
+            <View style={s.modalDetails}>
+              <View style={s.modalDetailRow}>
+                <Ionicons name="people-outline" size={14} color="#374151" />
+                <Text style={s.modalDetailText}>{selectedPeople} {parseInt(selectedPeople || '1') === 1 ? 'person needs' : 'people need'} rescue</Text>
+              </View>
+              {selectedSituation && (
+                <View style={s.modalDetailRow}>
+                  <Ionicons name="alert-circle-outline" size={14} color="#374151" />
+                  <Text style={s.modalDetailText}>{selectedSituation}</Text>
+                </View>
+              )}
+            </View>
+            <Text style={s.modalNote}>Rescue teams will be notified immediately.</Text>
+            <View style={s.modalBtns}>
+              <TouchableOpacity
+                style={s.modalCancelBtn}
+                onPress={() => setShowConfirmModal(false)}
+                activeOpacity={0.7}
+              >
+                <Text style={s.modalCancelText}>Cancel</Text>
+              </TouchableOpacity>
+              <TouchableOpacity
+                style={s.modalConfirmBtn}
+                onPress={handleConfirmUpdate}
+                activeOpacity={0.85}
+              >
+                <Text style={s.modalConfirmText}>Yes, send update</Text>
+              </TouchableOpacity>
+            </View>
+          </View>
+        </View>
+      </Modal>
 
       {/* Hotlines Card */}
       <View style={s.hotlineCard}>
@@ -267,7 +329,7 @@ const s = StyleSheet.create({
 
   // Banner
   banner: {
-    backgroundColor: '#dc2626',
+    backgroundColor: '#1d4ed8',
     borderRadius: 14,
     padding: 16,
     flexDirection: 'row',
@@ -275,13 +337,13 @@ const s = StyleSheet.create({
     gap: 14,
   },
   bannerIcon: {
-    width: 48, height: 48, borderRadius: 12,
-    backgroundColor: 'rgba(255,255,255,0.2)',
+    width: 46, height: 46, borderRadius: 12,
+    backgroundColor: 'rgba(255,255,255,0.18)',
     alignItems: 'center', justifyContent: 'center',
   },
   bannerText: { flex: 1 },
-  bannerTitle: { fontSize: 14, fontWeight: '800', color: '#ffffff', letterSpacing: 0.3 },
-  bannerSub: { fontSize: 12, color: 'rgba(255,255,255,0.88)', marginTop: 3, lineHeight: 17 },
+  bannerTitle: { fontSize: 15, fontWeight: '700', color: '#ffffff', letterSpacing: 0.1 },
+  bannerSub: { fontSize: 12, color: 'rgba(255,255,255,0.82)', marginTop: 3, lineHeight: 17 },
 
   // SOS Card
   sosCard: {
@@ -296,26 +358,27 @@ const s = StyleSheet.create({
     elevation: 4,
   },
 
-  // SOS Button — red when ready, grey-green when sent
+  // Rectangle SOS Button
   sosButton: {
-    width: 200, height: 200, borderRadius: 100,
+    width: '100%',
     backgroundColor: '#dc2626',
-    alignItems: 'center', justifyContent: 'center',
-    shadowColor: '#dc2626',
-    shadowOffset: { width: 0, height: 8 },
-    shadowOpacity: 0.4,
-    shadowRadius: 20,
-    elevation: 10,
+    borderRadius: 12,
+    paddingVertical: 16,
+    paddingHorizontal: 24,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 10,
     marginBottom: 8,
   },
-  // Sent state: muted green to show success, clearly different from active red
   sosButtonSent: {
-    backgroundColor: '#16a34a',
-    shadowColor: '#16a34a',
-    shadowOpacity: 0.25,
-    elevation: 4,
+    backgroundColor: '#f0fdf4',
+    borderWidth: 1.5,
+    borderColor: '#86efac',
   },
-  sosInner: { alignItems: 'center', justifyContent: 'center' },
+  sosButtonText:     { fontSize: 16, fontWeight: '700', color: '#ffffff' },
+  sosButtonTextSent: { color: '#16a34a' },
+  sosInner: { flexDirection: 'row', alignItems: 'center', gap: 14 },
 
   sosTapHint: {
     fontSize: 13,
@@ -418,4 +481,29 @@ const s = StyleSheet.create({
     padding: 12, marginTop: 8,
   },
   infoText: { flex: 1, fontSize: 12, color: '#991b1b', lineHeight: 18 },
+
+  updateSentBadge: {
+    flexDirection: 'row', alignItems: 'center', gap: 8,
+    backgroundColor: '#f0fdf4', borderRadius: 10,
+    paddingHorizontal: 14, paddingVertical: 10,
+    borderWidth: 1, borderColor: '#86efac',
+    width: '100%',
+  },
+  updateSentText: { fontSize: 13, color: '#16a34a', fontWeight: '600', flex: 1 },
+
+  // Confirmation Modal
+  modalOverlay:    { flex: 1, backgroundColor: 'rgba(0,0,0,0.45)', justifyContent: 'center', alignItems: 'center', padding: 24 },
+  modalCard:       { backgroundColor: '#ffffff', borderRadius: 20, padding: 24, width: '100%', alignItems: 'center' },
+  modalIconWrap:   { width: 56, height: 56, borderRadius: 16, backgroundColor: '#eff6ff', alignItems: 'center', justifyContent: 'center', marginBottom: 14 },
+  modalTitle:      { fontSize: 17, fontWeight: '700', color: '#111827', marginBottom: 6, textAlign: 'center' },
+  modalBody:       { fontSize: 13, color: '#6b7280', textAlign: 'center', marginBottom: 14, lineHeight: 18 },
+  modalDetails:    { backgroundColor: '#f8fafc', borderRadius: 10, padding: 12, width: '100%', gap: 8, marginBottom: 12 },
+  modalDetailRow:  { flexDirection: 'row', alignItems: 'center', gap: 8 },
+  modalDetailText: { fontSize: 13, color: '#374151', fontWeight: '500' },
+  modalNote:       { fontSize: 12, color: '#9ca3af', textAlign: 'center', marginBottom: 20, lineHeight: 17 },
+  modalBtns:       { flexDirection: 'row', gap: 10, width: '100%' },
+  modalCancelBtn:  { flex: 1, borderWidth: 1.5, borderColor: '#e5e7eb', borderRadius: 10, paddingVertical: 13, alignItems: 'center' },
+  modalCancelText: { fontSize: 14, fontWeight: '600', color: '#374151' },
+  modalConfirmBtn: { flex: 1, backgroundColor: '#2563eb', borderRadius: 10, paddingVertical: 13, alignItems: 'center' },
+  modalConfirmText:{ fontSize: 14, fontWeight: '600', color: '#ffffff' },
 });

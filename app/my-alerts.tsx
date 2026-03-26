@@ -3,6 +3,7 @@ import {
   View, Text, TouchableOpacity, StyleSheet,
   SafeAreaView, ScrollView, Platform, Modal,
   TextInput, Alert, Dimensions, KeyboardAvoidingView,
+  ActivityIndicator,
 } from 'react-native';
 import { router } from 'expo-router';
 import { Ionicons } from '@expo/vector-icons';
@@ -22,7 +23,7 @@ const SITUATION_OPTIONS = [
 ];
 
 export default function MyAlertsScreen() {
-  const { alerts, updateAlert, logActivity } = useApp();
+  const { alerts, updateAlert, logActivity, loadingAlerts } = useApp();
   const [editingAlert, setEditingAlert]           = useState<string | null>(null);
   const [editPeople, setEditPeople]               = useState('');
   const [editSituation, setEditSituation]         = useState('');
@@ -79,7 +80,13 @@ export default function MyAlertsScreen() {
       <ScrollView showsVerticalScrollIndicator={false} contentContainerStyle={s.scroll}>
         <Text style={s.sectionTitle}>Emergency Alerts</Text>
 
-        {alerts.length === 0 ? (
+        {/* Loading State */}
+        {loadingAlerts ? (
+          <View style={s.loadingCard}>
+            <ActivityIndicator size="large" color="#2563eb" />
+            <Text style={s.loadingText}>Loading alerts...</Text>
+          </View>
+        ) : alerts.length === 0 ? (
           <View style={s.emptyCard}>
             <Ionicons name="notifications-off-outline" size={48} color="#d1d5db" />
             <Text style={s.emptyTitle}>No alerts yet</Text>
@@ -299,6 +306,14 @@ const s = StyleSheet.create({
 
   scroll: { padding: 16, gap: 14, paddingBottom: 40 },
   sectionTitle: { fontSize: 16, fontWeight: '700', color: '#111827', marginBottom: 4 },
+
+  loadingCard: {
+    backgroundColor: '#ffffff', borderRadius: 16, padding: 40,
+    alignItems: 'center', gap: 16,
+    shadowColor: '#000', shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.06, shadowRadius: 8, elevation: 2,
+  },
+  loadingText: { fontSize: 14, color: '#6b7280', fontWeight: '500' },
 
   // Empty state
   emptyCard: {

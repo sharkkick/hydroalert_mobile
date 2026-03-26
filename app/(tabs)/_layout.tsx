@@ -4,11 +4,19 @@ import { Ionicons, MaterialCommunityIcons } from '@expo/vector-icons';
 import { useState } from 'react';
 import { signOut } from 'firebase/auth';
 import { auth } from '../firebase';
+import { useApp } from '../AppContext';
 
 const { width } = Dimensions.get('window');
 
 // ── Slide-out Menu ──
 function SideMenu({ visible, onClose, onLogout }: { visible: boolean; onClose: () => void; onLogout: () => void }) {
+  const { user } = useApp();
+  
+  // Get display name - full name or fallback to email name or "User"
+  const displayName = user.firstName
+    ? (user.lastName ? `${user.firstName} ${user.lastName}` : user.firstName)
+    : (user.email ? user.email.split('@')[0] : 'User');
+
   const menuItems = [
     { icon: 'person-outline' as const, label: 'Profile',      route: '/profile'      },
     { icon: 'notifications-outline' as const, label: 'My Alerts',   route: '/my-alerts'   },
@@ -29,7 +37,7 @@ function SideMenu({ visible, onClose, onLogout }: { visible: boolean; onClose: (
             <View style={m.avatarCircle}>
               <Ionicons name="person" size={36} color="#ffffff" />
             </View>
-            <Text style={m.menuTitle}>Menu</Text>
+            <Text style={m.menuTitle}>{displayName}</Text>
           </View>
 
           <View style={m.menuList}>

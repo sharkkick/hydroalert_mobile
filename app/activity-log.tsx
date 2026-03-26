@@ -2,6 +2,7 @@ import React from 'react';
 import {
   View, Text, StyleSheet, SafeAreaView,
   ScrollView, TouchableOpacity, Platform,
+  ActivityIndicator,
 } from 'react-native';
 import { router } from 'expo-router';
 import { Ionicons } from '@expo/vector-icons';
@@ -60,7 +61,7 @@ const TYPE_CONFIG = {
 };
 
 export default function ActivityLogScreen() {
-  const { activities } = useApp();
+  const { activities, loadingActivities } = useApp();
 
   return (
     <SafeAreaView style={s.safe}>
@@ -75,7 +76,13 @@ export default function ActivityLogScreen() {
       <ScrollView showsVerticalScrollIndicator={false} contentContainerStyle={s.scroll}>
         <Text style={s.sectionTitle}>Activity Log</Text>
 
-        {activities.length === 0 ? (
+        {/* Loading State */}
+        {loadingActivities ? (
+          <View style={s.loadingCard}>
+            <ActivityIndicator size="large" color="#2563eb" />
+            <Text style={s.loadingText}>Loading activities...</Text>
+          </View>
+        ) : activities.length === 0 ? (
           <View style={s.emptyCard}>
             <Ionicons name="time-outline" size={48} color="#d1d5db" />
             <Text style={s.emptyTitle}>No activity yet</Text>
@@ -120,6 +127,13 @@ const s = StyleSheet.create({
 
   scroll: { padding: 16, gap: 12, paddingBottom: 40 },
   sectionTitle: { fontSize: 16, fontWeight: '700', color: '#111827', marginBottom: 4 },
+
+  loadingCard: {
+    backgroundColor: '#ffffff', borderRadius: 16, padding: 40,
+    alignItems: 'center', gap: 16,
+    shadowColor: '#000', shadowOffset: { width: 0, height: 2 }, shadowOpacity: 0.06, shadowRadius: 8, elevation: 2,
+  },
+  loadingText: { fontSize: 14, color: '#6b7280', fontWeight: '500' },
 
   emptyCard: {
     backgroundColor: '#ffffff', borderRadius: 16, padding: 40,
