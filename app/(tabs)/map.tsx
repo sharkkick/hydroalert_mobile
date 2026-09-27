@@ -1,269 +1,346 @@
-import { View, Text, StyleSheet, ScrollView, Dimensions, TouchableOpacity, Modal } from 'react-native';
+import { View, Text, StyleSheet, TouchableOpacity, ActivityIndicator, Platform, Dimensions } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
-import { useState } from 'react';
+import { useState, useEffect, useRef } from 'react';
+import * as Location from 'expo-location';
+import { supabase } from '../../lib/supabase';
+import { MapView, Marker, Callout, PROVIDER_GOOGLE } from '../../components/MapViewNative';
 
 const { width, height } = Dimensions.get('window');
-const MAP_W = width - 28;
-const MAP_H = 280;
 
-const SENSORS_MAP = [
-  { id: 'S-001', name: 'Upstream Bridge',  x: 0.10, y: 0.22, status: 'normal'   },
-  { id: 'S-002', name: 'Downtown Area',    x: 0.35, y: 0.22, status: 'normal'   },
-  { id: 'S-003', name: 'East Riverside',   x: 0.60, y: 0.22, status: 'critical' },
-  { id: 'S-004', name: 'South Bridge',     x: 0.82, y: 0.22, status: 'normal'   },
-  { id: 'S-006', name: 'West Channel',     x: 0.10, y: 0.72, status: 'warning'  },
-  { id: 'S-007', name: 'Industrial Zone',  x: 0.35, y: 0.72, status: 'normal'   },
-  { id: 'S-008', name: 'Residential Park', x: 0.60, y: 0.72, status: 'warning'  },
-  { id: 'S-009', name: 'North District',   x: 0.82, y: 0.72, status: 'normal'   },
-];
-
-const SENSOR_DETAILS = [
-  { id: 'S-001', name: 'Upstream Bridge',  status: 'normal',   waterLevel: '2.3m',  rainfall: '5mm/hr',   lat: '14.5995', lng: '120.9842' },
-  { id: 'S-002', name: 'Downtown Area',    status: 'normal',   waterLevel: '1.8m',  rainfall: '3.2mm/hr', lat: '14.599',  lng: '120.9838' },
-  { id: 'S-003', name: 'East Riverside',   status: 'critical', waterLevel: '4.7m',  rainfall: '18.5mm/hr',lat: '14.5985', lng: '120.985'  },
-  { id: 'S-004', name: 'South Bridge',     status: 'normal',   waterLevel: '2.1m',  rainfall: '4mm/hr',   lat: '14.598',  lng: '120.9845' },
-  { id: 'S-005', name: 'North District',   status: 'warning',  waterLevel: '3.5m',  rainfall: '12mm/hr',  lat: '14.6321', lng: '120.9987' },
-  { id: 'S-006', name: 'West Channel',     status: 'normal',   waterLevel: '2.4m',  rainfall: '6mm/hr',   lat: '14.6045', lng: '120.9845' },
-  { id: 'S-007', name: 'Industrial Zone',  status: 'warning',  waterLevel: '3.2m',  rainfall: '9mm/hr',   lat: '14.602',  lng: '120.987'  },
-  { id: 'S-008', name: 'Residential Park', status: 'normal',   waterLevel: '1.9m',  rainfall: '4.5mm/hr', lat: '14.595',  lng: '120.982'  },
-];
-
-const STATUS_COLOR = { normal: '#22c55e', warning: '#f59e0b', critical: '#ef4444' };
-const STATUS_ICON = {
-  normal:   'checkmark-circle' as const,
-  warning:  'warning'          as const,
-  critical: 'alert-circle'     as const,
+// Default center: Bacoor, Cavite
+const DEFAULT_REGION = {
+  latitude: 14.4624,
+  longitude: 120.9340,
+  latitudeDelta: 0.08,
+  longitudeDelta: 0.08,
 };
 
-// Full-screen map modal
-function MapExpandModal({ visible, onClose }: { visible: boolean; onClose: () => void }) {
-  const mw = width - 32;
-  const mh = height * 0.55;
-  const [sel, setSel] = useState<string | null>(null);
-  return (
-    <Modal visible={visible} transparent animationType="fade" onRequestClose={onClose}>
-      <View style={mm.overlay}>
-        <TouchableOpacity style={mm.backdrop} onPress={onClose} activeOpacity={1} />
-        <View style={mm.sheet}>
-          <View style={mm.header}>
-            <Text style={mm.title}>Sensor Network Map</Text>
-            <TouchableOpacity onPress={onClose} hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}>
-              <Ionicons name="close" size={22} color="#374151" />
-            </TouchableOpacity>
-          </View>
-          <View style={[mm.mapArea, { height: mh }]}>
-            {/* Grid */}
-            {[0.25, 0.5, 0.75].map(p => <View key={`h${p}`} style={[mm.gridH, { top: mh * p }]} />)}
-            {[0.25, 0.5, 0.75].map(p => <View key={`v${p}`} style={[mm.gridV, { left: mw * p }]} />)}
-            <View style={[mm.river, { top: mh * 0.47 }]} />
-            {/* Pins */}
-            {SENSORS_MAP.map(sensor => (
-              <TouchableOpacity
-                key={sensor.id}
-                style={[mm.pin, { left: mw * sensor.x - 22, top: mh * sensor.y - 22 }]}
-                onPress={() => setSel(sel === sensor.id ? null : sensor.id)}
-                activeOpacity={0.8}
-              >
-                <View style={[mm.pinCircle, { backgroundColor: STATUS_COLOR[sensor.status as keyof typeof STATUS_COLOR] }]}>
-                  <Ionicons name="location" size={18} color="#fff" />
-                </View>
-                <Text style={mm.pinLabel}>{sensor.id}</Text>
-                {sel === sensor.id && (
-                  <View style={mm.tooltip}>
-                    <Text style={mm.tooltipName}>{sensor.name}</Text>
-                    <Text style={[mm.tooltipStatus, { color: STATUS_COLOR[sensor.status as keyof typeof STATUS_COLOR] }]}>
-                      {sensor.status.charAt(0).toUpperCase() + sensor.status.slice(1)}
-                    </Text>
-                  </View>
-                )}
-              </TouchableOpacity>
-            ))}
-          </View>
-        </View>
-      </View>
-    </Modal>
-  );
+interface SosMarker {
+  id: string;
+  latitude: number;
+  longitude: number;
+  status: string;
+  userName: string;
+  createdAt: string;
+  barangay: string;
 }
 
-const mm = StyleSheet.create({
-  overlay: { flex: 1, justifyContent: 'center', alignItems: 'center', backgroundColor: 'rgba(0,0,0,0.5)', padding: 16 },
-  backdrop: { position: 'absolute', inset: 0 } as any,
-  sheet: { backgroundColor: '#fff', borderRadius: 20, width: '100%', maxWidth: 480, overflow: 'hidden', shadowColor: '#000', shadowOffset: { width: 0, height: 8 }, shadowOpacity: 0.2, shadowRadius: 20, elevation: 12 },
-  header: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', padding: 16 },
-  title: { fontSize: 15, fontWeight: '700', color: '#111827' },
-  mapArea: { backgroundColor: '#e8f5e9', position: 'relative', overflow: 'hidden' },
-  gridH: { position: 'absolute', left: 0, right: 0, height: 1, backgroundColor: 'rgba(0,0,0,0.05)' },
-  gridV: { position: 'absolute', top: 0, bottom: 0, width: 1, backgroundColor: 'rgba(0,0,0,0.05)' },
-  river: { position: 'absolute', left: 0, right: 0, height: 8, backgroundColor: 'rgba(59,130,246,0.2)', borderRadius: 4 },
-  pin: { position: 'absolute', alignItems: 'center', zIndex: 2 },
-  pinCircle: { width: 40, height: 40, borderRadius: 20, alignItems: 'center', justifyContent: 'center', borderWidth: 2, borderColor: 'rgba(255,255,255,0.7)', shadowColor: '#000', shadowOffset: { width: 0, height: 2 }, shadowOpacity: 0.2, shadowRadius: 4, elevation: 4 },
-  pinLabel: { fontSize: 9, fontWeight: '700', color: '#1f2937', backgroundColor: 'rgba(255,255,255,0.9)', borderRadius: 4, paddingHorizontal: 4, paddingVertical: 1, marginTop: 2 },
-  tooltip: { position: 'absolute', bottom: '100%', backgroundColor: '#fff', borderRadius: 8, padding: 8, shadowColor: '#000', shadowOffset: { width: 0, height: 2 }, shadowOpacity: 0.12, shadowRadius: 6, elevation: 6, zIndex: 10, minWidth: 110, alignItems: 'center', marginBottom: 4 },
-  tooltipName: { fontSize: 11, fontWeight: '700', color: '#111827' },
-  tooltipStatus: { fontSize: 10, fontWeight: '600', marginTop: 2 },
-});
+function getStatusLabel(statusId: number | string): string {
+  const id = Number(statusId);
+  if (id === 1) return 'Sent';
+  if (id === 2) return 'Dispatched';
+  if (id === 3) return 'Rescued';
+  return 'Pending';
+}
+
+function getStatusColor(statusId: number | string): string {
+  const id = Number(statusId);
+  if (id === 1) return '#dc2626'; // red - active
+  if (id === 2) return '#f59e0b'; // amber - dispatched
+  if (id === 3) return '#16a34a'; // green - rescued
+  return '#6b7280'; // gray - pending
+}
+
+function getMarkerColor(statusId: number | string): string {
+  const id = Number(statusId);
+  if (id === 1) return 'red';
+  if (id === 2) return 'orange';
+  if (id === 3) return 'green';
+  return 'gray';
+}
 
 export default function MapScreen() {
-  const [selected, setSelected] = useState<string | null>(null);
-  const [expandedSensor, setExpandedSensor] = useState<string | null>(null);
-  const [mapExpanded, setMapExpanded] = useState(false);
+  const mapRef = useRef<any>(null);
+  const [userLocation, setUserLocation] = useState<{ latitude: number; longitude: number } | null>(null);
+  const [sosMarkers, setSosMarkers] = useState<SosMarker[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [refreshing, setRefreshing] = useState(false);
+
+  // Get user location
+  useEffect(() => {
+    (async () => {
+      try {
+        const { status } = await Location.requestForegroundPermissionsAsync();
+        if (status === 'granted') {
+          const loc = await Location.getCurrentPositionAsync({
+            accuracy: Location.Accuracy.Balanced,
+          });
+          setUserLocation({
+            latitude: loc.coords.latitude,
+            longitude: loc.coords.longitude,
+          });
+        }
+      } catch (err) {
+        console.warn('[Map] Could not get location:', err);
+      }
+    })();
+  }, []);
+
+  // Fetch SOS alerts from Supabase
+  const fetchSosAlerts = async () => {
+    try {
+      // Try sos_alerts table first
+      const { data, error } = await supabase
+        .from('sos_alerts')
+        .select('sos_id, latitude, longitude, status_id, user_id')
+        .not('latitude', 'eq', 0)
+        .not('longitude', 'eq', 0)
+        .order('sos_id', { ascending: false })
+        .limit(50);
+
+      if (error) {
+        console.error('[Map] Error fetching SOS alerts:', error.message);
+        return;
+      }
+
+      if (data && data.length > 0) {
+        // Fetch user names for the alerts
+        const userIds = [...new Set(data.map((d: any) => d.user_id).filter(Boolean))];
+        let userMap: Record<string, string> = {};
+
+        if (userIds.length > 0) {
+          const { data: users } = await supabase
+            .from('users')
+            .select('user_id, full_name, barangay')
+            .in('user_id', userIds);
+
+          if (users) {
+            users.forEach((u: any) => {
+              userMap[u.user_id] = u.full_name || 'Resident';
+            });
+          }
+        }
+
+        const markers: SosMarker[] = data.map((alert: any) => ({
+          id: String(alert.sos_id),
+          latitude: alert.latitude,
+          longitude: alert.longitude,
+          status: getStatusLabel(alert.status_id),
+          userName: userMap[alert.user_id] || 'Resident',
+          createdAt: '',
+          barangay: '',
+        }));
+
+        setSosMarkers(markers);
+      }
+    } catch (err) {
+      console.error('[Map] Error:', err);
+    } finally {
+      setLoading(false);
+      setRefreshing(false);
+    }
+  };
+
+  useEffect(() => {
+    fetchSosAlerts();
+
+    // Auto-refresh every 15 seconds
+    const interval = setInterval(fetchSosAlerts, 15000);
+    return () => clearInterval(interval);
+  }, []);
+
+  // Subscribe to realtime SOS updates
+  useEffect(() => {
+    const channel = supabase
+      .channel('map_sos_realtime')
+      .on(
+        'postgres_changes',
+        { event: '*', schema: 'public', table: 'sos_alerts' },
+        () => {
+          fetchSosAlerts();
+        },
+      )
+      .subscribe();
+
+    return () => { supabase.removeChannel(channel); };
+  }, []);
+
+  const handleRefresh = () => {
+    setRefreshing(true);
+    fetchSosAlerts();
+  };
+
+  const handleCenterOnUser = () => {
+    if (userLocation && mapRef.current) {
+      mapRef.current.animateToRegion({
+        ...userLocation,
+        latitudeDelta: 0.01,
+        longitudeDelta: 0.01,
+      }, 500);
+    }
+  };
+
+  const activeAlerts = sosMarkers.filter(m => m.status === 'Sent' || m.status === 'Dispatched');
 
   return (
-    <ScrollView style={s.container} contentContainerStyle={s.scroll} showsVerticalScrollIndicator={false}>
-
-      {/* Map */}
-      <View style={s.mapCard}>
-        <View style={[s.mapArea, { height: MAP_H }]}>
-          {[0.33, 0.66].map(p => <View key={`h${p}`} style={[s.gridH, { top: MAP_H * p }]} />)}
-          {[0.25, 0.5, 0.75].map(p => <View key={`v${p}`} style={[s.gridV, { left: MAP_W * p }]} />)}
-          <View style={s.river} />
-
-          {SENSORS_MAP.map(sensor => (
-            <TouchableOpacity
-              key={sensor.id}
-              style={[s.pin, { left: MAP_W * sensor.x - 22, top: MAP_H * sensor.y - 22 }]}
-              onPress={() => setSelected(selected === sensor.id ? null : sensor.id)}
-              activeOpacity={0.8}
+    <View style={s.container}>
+      {/* Map — native only */}
+      {MapView ? (
+        <MapView
+          ref={mapRef}
+          style={s.map}
+          provider={Platform.OS === 'android' ? PROVIDER_GOOGLE : undefined}
+          initialRegion={userLocation ? { ...userLocation, latitudeDelta: 0.05, longitudeDelta: 0.05 } : DEFAULT_REGION}
+          showsUserLocation
+          showsMyLocationButton={false}
+          showsCompass
+        >
+          {/* SOS Alert Markers */}
+          {sosMarkers.map(marker => (
+            <Marker
+              key={marker.id}
+              coordinate={{ latitude: marker.latitude, longitude: marker.longitude }}
+              pinColor={getMarkerColor(marker.status === 'Sent' ? 1 : marker.status === 'Dispatched' ? 2 : marker.status === 'Rescued' ? 3 : 0)}
             >
-              <View style={[s.pinCircle, { backgroundColor: STATUS_COLOR[sensor.status as keyof typeof STATUS_COLOR] }]}>
-                <Ionicons name="location" size={18} color="#fff" />
-              </View>
-              <Text style={s.pinLabel}>{sensor.id}</Text>
-              {selected === sensor.id && (
-                <View style={s.tooltip}>
-                  <Text style={s.tooltipName}>{sensor.name}</Text>
-                  <Text style={[s.tooltipStatus, { color: STATUS_COLOR[sensor.status as keyof typeof STATUS_COLOR] }]}>
-                    {sensor.status.charAt(0).toUpperCase() + sensor.status.slice(1)}
+              <Callout>
+                <View style={s.callout}>
+                  <Text style={s.calloutTitle}>🚨 SOS Alert</Text>
+                  <Text style={s.calloutText}>{marker.userName}</Text>
+                  <Text style={[s.calloutStatus, { color: getStatusColor(marker.status === 'Sent' ? 1 : marker.status === 'Dispatched' ? 2 : 3) }]}>
+                    Status: {marker.status}
+                  </Text>
+                  <Text style={s.calloutTime}>{marker.createdAt}</Text>
+                  <Text style={s.calloutCoords}>
+                    {marker.latitude.toFixed(5)}, {marker.longitude.toFixed(5)}
                   </Text>
                 </View>
-              )}
-            </TouchableOpacity>
+              </Callout>
+            </Marker>
           ))}
-
-          {/* Legend — bottom right */}
-          <View style={s.legend}>
-            <Text style={s.legendTitle}>Status Legend</Text>
-            {(['normal', 'warning', 'critical'] as const).map(st => (
-              <View key={st} style={s.legendRow}>
-                <View style={[s.legendDot, { backgroundColor: STATUS_COLOR[st] }]} />
-                <Text style={s.legendText}>{st.charAt(0).toUpperCase() + st.slice(1)}</Text>
-              </View>
-            ))}
-          </View>
-
-          {/* Expand button — top left */}
-          <TouchableOpacity style={s.expandBtn} onPress={() => setMapExpanded(true)}>
-            <Ionicons name="expand-outline" size={16} color="#374151" />
-          </TouchableOpacity>
-        </View>
-      </View>
-
-      {/* Sensor Network — expandable list */}
-      <View style={s.card}>
-        <View style={s.listHeader}>
-          <View>
-            <Text style={s.cardTitle}>Sensor Network</Text>
-            <Text style={s.cardSub}>8 active sensors</Text>
-          </View>
-        </View>
-
-        {SENSOR_DETAILS.map((sensor, i) => {
-          const isOpen = expandedSensor === sensor.id;
-          const statusColor = STATUS_COLOR[sensor.status as keyof typeof STATUS_COLOR];
-          const isCritical = sensor.status === 'critical';
-          const isWarning = sensor.status === 'warning';
-
-          return (
-            <View key={sensor.id} style={[s.sensorItem, i > 0 && s.sensorItemBorder]}>
-              {/* Row header - tappable */}
-              <TouchableOpacity
-                style={s.sensorRow}
-                onPress={() => setExpandedSensor(isOpen ? null : sensor.id)}
-                activeOpacity={0.7}
-              >
-                <Ionicons name={STATUS_ICON[sensor.status as keyof typeof STATUS_ICON]} size={22} color={statusColor} />
-                <View style={s.sensorInfo}>
-                  <Text style={s.sensorId}>{sensor.id}</Text>
-                  <Text style={s.sensorName}>{sensor.name}</Text>
-                </View>
-                <Ionicons name={isOpen ? 'chevron-up' : 'chevron-down'} size={18} color="#9ca3af" />
-              </TouchableOpacity>
-
-              {/* Expanded detail panel */}
-              {isOpen && (
-                <View style={[s.detailPanel, isCritical && s.detailPanelCritical, isWarning && s.detailPanelWarning]}>
-                  <View style={s.detailRow}>
-                    <Text style={s.detailLabel}>Water Level:</Text>
-                    <Text style={[s.detailValue, isCritical && { color: '#ef4444', fontWeight: '700' }]}>{sensor.waterLevel}</Text>
-                  </View>
-                  <View style={s.detailRow}>
-                    <Text style={s.detailLabel}>Rainfall:</Text>
-                    <Text style={s.detailValue}>{sensor.rainfall}</Text>
-                  </View>
-                  <View style={s.detailRow}>
-                    <Text style={s.detailLabel}>Location:</Text>
-                    <Text style={s.detailValue}>{sensor.lat}, {sensor.lng}</Text>
-                  </View>
-                  <View style={s.detailRow}>
-                    <Text style={s.detailLabel}>Status:</Text>
-                    <Text style={[s.detailStatus, { color: statusColor }]}>
-                      {sensor.status.toUpperCase()}
-                    </Text>
+        </MapView>
+      ) : (
+        <View style={s.webFallback}>
+          <Ionicons name="map-outline" size={48} color="#9ca3af" />
+          <Text style={s.webFallbackTitle}>Map View</Text>
+          <Text style={s.webFallbackText}>
+            The map is available on mobile devices only.{'\n'}Open this app in Expo Go on your phone to see the map.
+          </Text>
+          {sosMarkers.length > 0 && (
+            <View style={s.webAlertList}>
+              <Text style={s.webAlertListTitle}>Active SOS Alerts ({activeAlerts.length})</Text>
+              {sosMarkers.slice(0, 10).map(marker => (
+                <View key={marker.id} style={s.webAlertItem}>
+                  <View style={[s.webAlertDot, { backgroundColor: getStatusColor(marker.status === 'Sent' ? 1 : marker.status === 'Dispatched' ? 2 : 3) }]} />
+                  <View style={{ flex: 1 }}>
+                    <Text style={s.webAlertName}>{marker.userName}</Text>
+                    <Text style={s.webAlertInfo}>{marker.status} • {marker.latitude.toFixed(4)}, {marker.longitude.toFixed(4)}</Text>
                   </View>
                 </View>
-              )}
+              ))}
             </View>
-          );
-        })}
+          )}
+        </View>
+      )}
+
+      {/* Top info banner */}
+      <View style={s.topBanner}>
+        <View style={s.topBannerLeft}>
+          <Ionicons name="alert-circle" size={16} color={activeAlerts.length > 0 ? '#dc2626' : '#16a34a'} />
+          <Text style={s.topBannerText}>
+            {loading ? 'Loading...' : activeAlerts.length > 0
+              ? `${activeAlerts.length} active SOS alert${activeAlerts.length > 1 ? 's' : ''}`
+              : 'No active SOS alerts'}
+          </Text>
+        </View>
+        {refreshing && <ActivityIndicator size="small" color="#2563eb" />}
       </View>
 
-      <MapExpandModal visible={mapExpanded} onClose={() => setMapExpanded(false)} />
-    </ScrollView>
+      {/* Controls */}
+      <View style={s.controls}>
+        <TouchableOpacity style={s.controlBtn} onPress={handleRefresh} activeOpacity={0.7}>
+          <Ionicons name="refresh" size={20} color="#374151" />
+        </TouchableOpacity>
+        <TouchableOpacity style={s.controlBtn} onPress={handleCenterOnUser} activeOpacity={0.7}>
+          <Ionicons name="locate" size={20} color="#2563eb" />
+        </TouchableOpacity>
+      </View>
+
+      {/* Legend */}
+      <View style={s.legend}>
+        <Text style={s.legendTitle}>SOS Status</Text>
+        <View style={s.legendRow}>
+          <View style={[s.legendDot, { backgroundColor: '#dc2626' }]} />
+          <Text style={s.legendText}>Active</Text>
+        </View>
+        <View style={s.legendRow}>
+          <View style={[s.legendDot, { backgroundColor: '#f59e0b' }]} />
+          <Text style={s.legendText}>Dispatched</Text>
+        </View>
+        <View style={s.legendRow}>
+          <View style={[s.legendDot, { backgroundColor: '#16a34a' }]} />
+          <Text style={s.legendText}>Rescued</Text>
+        </View>
+      </View>
+
+      {/* Loading overlay */}
+      {loading && (
+        <View style={s.loadingOverlay}>
+          <ActivityIndicator size="large" color="#2563eb" />
+          <Text style={s.loadingText}>Loading SOS alerts...</Text>
+        </View>
+      )}
+    </View>
   );
 }
 
 const s = StyleSheet.create({
-  container: { flex: 1, backgroundColor: '#f1f5f9' },
-  scroll: { padding: 14, gap: 14, paddingBottom: 32 },
+  container: { flex: 1 },
+  map:       { flex: 1 },
 
-  mapCard: { borderRadius: 16, overflow: 'hidden', shadowColor: '#000', shadowOffset: { width: 0, height: 2 }, shadowOpacity: 0.08, shadowRadius: 8, elevation: 3 },
-  mapArea: { backgroundColor: '#e8f5e9', position: 'relative', overflow: 'hidden' },
-  gridH: { position: 'absolute', left: 0, right: 0, height: 1, backgroundColor: 'rgba(0,0,0,0.05)' },
-  gridV: { position: 'absolute', top: 0, bottom: 0, width: 1, backgroundColor: 'rgba(0,0,0,0.05)' },
-  river: { position: 'absolute', top: '47%', left: 0, right: 0, height: 8, backgroundColor: 'rgba(59,130,246,0.2)', borderRadius: 4 },
-  pin: { position: 'absolute', alignItems: 'center', zIndex: 2 },
-  pinCircle: { width: 40, height: 40, borderRadius: 20, alignItems: 'center', justifyContent: 'center', shadowColor: '#000', shadowOffset: { width: 0, height: 2 }, shadowOpacity: 0.2, shadowRadius: 4, elevation: 4, borderWidth: 2, borderColor: 'rgba(255,255,255,0.7)' },
-  pinLabel: { fontSize: 9, fontWeight: '700', color: '#1f2937', backgroundColor: 'rgba(255,255,255,0.9)', borderRadius: 4, paddingHorizontal: 4, paddingVertical: 1, marginTop: 2 },
-  tooltip: { position: 'absolute', bottom: '100%', backgroundColor: '#fff', borderRadius: 8, padding: 8, shadowColor: '#000', shadowOffset: { width: 0, height: 2 }, shadowOpacity: 0.12, shadowRadius: 6, elevation: 6, zIndex: 10, minWidth: 110, alignItems: 'center', marginBottom: 4 },
-  tooltipName: { fontSize: 11, fontWeight: '700', color: '#111827' },
-  tooltipStatus: { fontSize: 10, fontWeight: '600', marginTop: 2 },
-  legend: { position: 'absolute', bottom: 10, right: 10, backgroundColor: 'rgba(255,255,255,0.96)', borderRadius: 10, padding: 10, shadowColor: '#000', shadowOffset: { width: 0, height: 1 }, shadowOpacity: 0.08, shadowRadius: 4, elevation: 3, gap: 4, zIndex: 5 },
-  legendTitle: { fontSize: 10, fontWeight: '700', color: '#374151', marginBottom: 2 },
-  legendRow: { flexDirection: 'row', alignItems: 'center', gap: 6 },
-  legendDot: { width: 8, height: 8, borderRadius: 4 },
-  legendText: { fontSize: 10, color: '#6b7280' },
-  expandBtn: { position: 'absolute', top: 10, left: 10, backgroundColor: 'rgba(255,255,255,0.9)', borderRadius: 8, padding: 6, shadowColor: '#000', shadowOffset: { width: 0, height: 1 }, shadowOpacity: 0.08, shadowRadius: 3, elevation: 2, zIndex: 5 },
-
-  card: { backgroundColor: '#ffffff', borderRadius: 16, paddingVertical: 16, shadowColor: '#000', shadowOffset: { width: 0, height: 2 }, shadowOpacity: 0.06, shadowRadius: 8, elevation: 2 },
-  listHeader: { paddingHorizontal: 16, marginBottom: 8 },
-  cardTitle: { fontSize: 16, fontWeight: '700', color: '#111827' },
-  cardSub: { fontSize: 12, color: '#6b7280', marginTop: 2 },
-
-  sensorItem: { overflow: 'hidden' },
-  sensorItemBorder: { borderTopWidth: 1, borderTopColor: '#f3f4f6' },
-  sensorRow: { flexDirection: 'row', alignItems: 'center', paddingHorizontal: 16, paddingVertical: 14, gap: 12 },
-  sensorInfo: { flex: 1 },
-  sensorId: { fontSize: 15, fontWeight: '700', color: '#111827' },
-  sensorName: { fontSize: 12, color: '#6b7280', marginTop: 1 },
-
-  detailPanel: {
-    marginHorizontal: 16, marginBottom: 14,
-    backgroundColor: '#f1f5f9', borderRadius: 12, padding: 14, gap: 8,
+  topBanner: {
+    position: 'absolute', top: 10, left: 14, right: 14,
+    backgroundColor: '#fff', borderRadius: 12, padding: 12,
+    flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between',
+    shadowColor: '#000', shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.1, shadowRadius: 6, elevation: 4,
   },
-  detailPanelCritical: { backgroundColor: '#fff5f5' },
-  detailPanelWarning:  { backgroundColor: '#fffdf0' },
-  detailRow: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center' },
-  detailLabel: { fontSize: 13, color: '#6b7280' },
-  detailValue: { fontSize: 13, color: '#111827', fontWeight: '500' },
-  detailStatus: { fontSize: 13, fontWeight: '800', letterSpacing: 0.3 },
+  topBannerLeft: { flexDirection: 'row', alignItems: 'center', gap: 8 },
+  topBannerText: { fontSize: 13, fontWeight: '600', color: '#111827' },
+
+  controls: {
+    position: 'absolute', right: 14, bottom: 100,
+    gap: 8,
+  },
+  controlBtn: {
+    width: 44, height: 44, borderRadius: 22,
+    backgroundColor: '#fff', alignItems: 'center', justifyContent: 'center',
+    shadowColor: '#000', shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.12, shadowRadius: 4, elevation: 4,
+  },
+
+  legend: {
+    position: 'absolute', bottom: 20, left: 14,
+    backgroundColor: 'rgba(255,255,255,0.95)', borderRadius: 10,
+    padding: 10, gap: 4,
+    shadowColor: '#000', shadowOffset: { width: 0, height: 1 },
+    shadowOpacity: 0.08, shadowRadius: 4, elevation: 3,
+  },
+  legendTitle: { fontSize: 10, fontWeight: '700', color: '#374151', marginBottom: 2 },
+  legendRow:   { flexDirection: 'row', alignItems: 'center', gap: 6 },
+  legendDot:   { width: 10, height: 10, borderRadius: 5 },
+  legendText:  { fontSize: 11, color: '#6b7280' },
+
+  callout:       { padding: 4, minWidth: 150 },
+  calloutTitle:  { fontSize: 14, fontWeight: '700', color: '#111827', marginBottom: 4 },
+  calloutText:   { fontSize: 12, color: '#374151', marginBottom: 2 },
+  calloutStatus: { fontSize: 12, fontWeight: '700', marginBottom: 2 },
+  calloutTime:   { fontSize: 10, color: '#9ca3af', marginBottom: 2 },
+  calloutCoords: { fontSize: 9, color: '#9ca3af' },
+
+  loadingOverlay: {
+    ...StyleSheet.absoluteFillObject,
+    backgroundColor: 'rgba(255,255,255,0.8)',
+    alignItems: 'center', justifyContent: 'center',
+  },
+  loadingText: { fontSize: 13, color: '#6b7280', marginTop: 8 },
+
+  webFallback:      { flex: 1, backgroundColor: '#f1f5f9', alignItems: 'center', justifyContent: 'center', padding: 24 },
+  webFallbackTitle: { fontSize: 18, fontWeight: '700', color: '#374151', marginTop: 12 },
+  webFallbackText:  { fontSize: 13, color: '#6b7280', textAlign: 'center', marginTop: 8, lineHeight: 20 },
+  webAlertList:     { marginTop: 20, width: '100%', maxWidth: 400, backgroundColor: '#fff', borderRadius: 12, padding: 16 },
+  webAlertListTitle:{ fontSize: 14, fontWeight: '700', color: '#111827', marginBottom: 10 },
+  webAlertItem:     { flexDirection: 'row', alignItems: 'center', gap: 10, paddingVertical: 8, borderBottomWidth: 0.5, borderColor: '#f3f4f6' },
+  webAlertDot:      { width: 10, height: 10, borderRadius: 5 },
+  webAlertName:     { fontSize: 13, fontWeight: '600', color: '#111827' },
+  webAlertInfo:     { fontSize: 11, color: '#6b7280', marginTop: 1 },
 });

@@ -1,8 +1,9 @@
-import { View, Text, StyleSheet, ScrollView, TouchableOpacity } from 'react-native';
+import { View, Text, StyleSheet, ScrollView, TouchableOpacity, ActivityIndicator } from 'react-native';
 import { Ionicons, MaterialCommunityIcons } from '@expo/vector-icons';
-import { useState } from 'react';
+import { useState, useEffect } from 'react';
+import { getRainfallForecast, ForecastSummary } from '../../lib/sensor-api';
 
-// ── Simulated current conditions (replace with real Firebase data) ──
+// ── Simulated current conditions (replace with real backend data) ──
 const CURRENT = {
   waterLevel: 3.5,
   rainfallRate: 18,
@@ -61,10 +62,10 @@ const ALERT_LEVELS = [
 ];
 
 const RAINFALL_GUIDE = [
-  { label: 'Light',    range: 'Below 7.5mm/hr',  color: '#2563eb', bg: '#eff6ff',  desc: 'Gentle, steady rain. Streets may get wet but no flooding risk.' },
-  { label: 'Moderate', range: '7.5 – 15mm/hr',   color: '#ca8a04', bg: '#fef9c3',  desc: 'Noticeable rainfall. Low-lying areas may start to accumulate water.' },
-  { label: 'Heavy',    range: '15 – 30mm/hr',     color: '#ea580c', bg: '#ffedd5',  desc: 'Rapid accumulation. Drainage systems may overflow. Flash flood risk.' },
-  { label: 'Extreme',  range: 'Above 30mm/hr',    color: '#dc2626', bg: '#fee2e2',  desc: 'Very intense. Severe flooding likely. Evacuation may be needed.' },
+  { label: 'No Warning',      range: 'Below 7.5mm/hr',  color: '#2563eb', bg: '#eff6ff',  desc: 'Rainfall is below PAGASA warning level.' },
+  { label: 'Yellow Warning',  range: '7.5 – 14.9mm/hr', color: '#ca8a04', bg: '#fef9c3',  desc: 'Heavy rainfall. Stay alert in flood-prone areas.' },
+  { label: 'Orange Warning',  range: '15 – 30mm/hr',    color: '#ea580c', bg: '#ffedd5',  desc: 'Intense rainfall. Be ready for rapid flooding.' },
+  { label: 'Red Warning',     range: 'Above 30mm/hr',   color: '#dc2626', bg: '#fee2e2',  desc: 'Torrential rainfall. Take immediate safety action.' },
 ];
 
 const SAFETY_TIPS = [
@@ -90,8 +91,16 @@ function getCurrentRainfallCategory() {
 
 export default function HomeScreen() {
   const [expandedAlert, setExpandedAlert] = useState<string | null>(null);
+  const [forecast, setForecast] = useState<ForecastSummary | null>(null);
+  const [forecastLoading, setForecastLoading] = useState(true);
   const currentAlert    = getCurrentAlertLevel();
   const currentRainCat  = getCurrentRainfallCategory();
+
+  useEffect(() => {
+    getRainfallForecast()
+      .then(setForecast)
+      .finally(() => setForecastLoading(false));
+  }, []);
 
   return (
     <ScrollView style={s.container} contentContainerStyle={s.scroll} showsVerticalScrollIndicator={false}>
@@ -115,6 +124,60 @@ export default function HomeScreen() {
           </View>
         </View>
         <Text style={[s.bannerAction, { color: currentAlert.color }]}>{currentAlert.action}</Text>
+      </View>
+
+      {/* Rain Forecast Card */}
+      <View style={[s.card, forecast?.heavyRainExpected && { backgroundColor: '#fef2f2', borderColor: '#fecaca', borderWidth: 1 }]}>
+        <View style={s.cardTitleRow}>
+          <MaterialCommunityIcons name="weather-partly-rainy" size={18} color="#2563eb" />
+          <Text style={[s.cardTitle, { marginBottom: 0 }]}>Rain Forecast (5-Day)</Text>
+        </View>
+        {forecastLoading ? (
+          <View style={{ paddingVertical: 20, alignItems: 'center' }}>
+            <ActivityIndicator size="small" color="#3b82f6" />
+            <Text style={{ fontSize: 12, color: '#9ca3af', marginTop: 6 }}>Loading forecast...</Text>
+          </View>
+        ) : forecast ? (
+          <View style={{ marginTop: 10 }}>
+            <View style={[s.forecastSummaryBox, {
+              backgroundColor: forecast.heavyRainExpected ? '#fee2e2' : forecast.rainExpected ? '#fffbeb' : '#dcfce7',
+              borderColor: forecast.heavyRainExpected ? '#fca5a5' : forecast.rainExpected ? '#fde68a' : '#86efac',
+            }]}>
+              <Text style={[s.forecastSummaryText, {
+                color: forecast.heavyRainExpected ? '#991b1b' : forecast.rainExpected ? '#92400e' : '#166534',
+              }]}>
+                {forecast.summaryText}
+              </Text>
+            </View>
+            <View style={s.forecastDaysRow}>
+              {forecast.days.slice(0, 5).map(day => {
+                const hasRain = day.maxPop >= 0.3 || day.totalRain > 0.5;
+                const isHeavy = day.totalRain >= 15 || day.maxPop >= 0.8;
+                return (
+                  <View key={day.date} style={s.forecastDayItem}>
+                    <Text style={s.forecastDayLabel}>{day.dayLabel.slice(0, 3)}</Text>
+                    <MaterialCommunityIcons
+                      name={isHeavy ? 'weather-pouring' : hasRain ? 'weather-rainy' : day.dominantWeather === 'Clouds' ? 'weather-cloudy' : 'weather-sunny'}
+                      size={22}
+                      color={isHeavy ? '#dc2626' : hasRain ? '#2563eb' : '#f59e0b'}
+                    />
+                    <Text style={[s.forecastPop, {
+                      color: isHeavy ? '#dc2626' : hasRain ? '#2563eb' : '#9ca3af',
+                      fontWeight: hasRain ? '700' : '500',
+                    }]}>
+                      {Math.round(day.maxPop * 100)}%
+                    </Text>
+                    {day.totalRain > 0 && (
+                      <Text style={s.forecastRainVol}>{day.totalRain}mm</Text>
+                    )}
+                  </View>
+                );
+              })}
+            </View>
+          </View>
+        ) : (
+          <Text style={{ fontSize: 12, color: '#9ca3af', marginTop: 8 }}>Unable to load forecast data.</Text>
+        )}
       </View>
 
       {/* Alert Levels */}
@@ -259,4 +322,12 @@ const s = StyleSheet.create({
   hotlineRow:   { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', paddingVertical: 10 },
   hotlineName:  { fontSize: 14, fontWeight: '600', color: '#111827' },
   hotlineNumber:{ fontSize: 15, fontWeight: '700', color: '#dc2626' },
+
+  forecastSummaryBox:  { borderRadius: 10, padding: 12, borderWidth: 1, marginBottom: 12 },
+  forecastSummaryText: { fontSize: 13, fontWeight: '600', lineHeight: 19 },
+  forecastDaysRow:     { flexDirection: 'row', justifyContent: 'space-between' },
+  forecastDayItem:     { alignItems: 'center', gap: 4, flex: 1 },
+  forecastDayLabel:    { fontSize: 11, fontWeight: '600', color: '#6b7280' },
+  forecastPop:         { fontSize: 11 },
+  forecastRainVol:     { fontSize: 9, color: '#6b7280' },
 });

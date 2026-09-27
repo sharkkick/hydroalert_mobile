@@ -1,10 +1,9 @@
 import { Tabs, router } from 'expo-router';
 import { Platform, View, Text, StyleSheet, TouchableOpacity, Modal, Dimensions } from 'react-native';
 import { Ionicons, MaterialCommunityIcons } from '@expo/vector-icons';
-import { useState } from 'react';
-import { signOut } from 'firebase/auth';
-import { auth } from '../firebase';
-import { useApp } from '../AppContext';
+import { useState, useEffect } from 'react';
+import { useApp } from '../app-context';
+import * as Notifications from 'expo-notifications';
 
 const { width } = Dimensions.get('window');
 
@@ -12,15 +11,14 @@ const { width } = Dimensions.get('window');
 function SideMenu({ visible, onClose, onLogout }: { visible: boolean; onClose: () => void; onLogout: () => void }) {
   const { user } = useApp();
   
-  // Get display name - full name or fallback to email name or "User"
   const displayName = user.firstName
     ? (user.lastName ? `${user.firstName} ${user.lastName}` : user.firstName)
     : (user.email ? user.email.split('@')[0] : 'User');
 
   const menuItems = [
-    { icon: 'person-outline' as const, label: 'Profile',      route: '/profile'      },
-    { icon: 'notifications-outline' as const, label: 'My Alerts',   route: '/my-alerts'   },
-    { icon: 'time-outline' as const, label: 'Activity Log', route: '/activity-log' },
+    { icon: 'person-outline' as const,        label: 'Profile',      route: '/profile'      },
+    { icon: 'notifications-outline' as const,  label: 'My Alerts',   route: '/my-alerts'   },
+    { icon: 'time-outline' as const,           label: 'Activity Log', route: '/activity-log' },
   ];
 
   const handleMenuItem = (route: string) => {
@@ -91,15 +89,15 @@ const m = StyleSheet.create({
     backgroundColor: 'rgba(255,255,255,0.25)',
     alignItems: 'center', justifyContent: 'center',
   },
-  menuTitle:    { fontSize: 22, fontWeight: '700', color: '#ffffff', marginTop: 4, textAlign: 'center' },
-  menuList:     { paddingTop: 8 },
-  menuItem:     { flexDirection: 'row', alignItems: 'center', paddingVertical: 16, paddingHorizontal: 24, gap: 14 },
-  menuIconWrap: { width: 36, height: 36, borderRadius: 10, backgroundColor: '#eff6ff', alignItems: 'center', justifyContent: 'center' },
-  menuLabel:    { flex: 1, fontSize: 15, fontWeight: '500', color: '#111827' },
-  divider:      { height: 1, backgroundColor: '#f3f4f6', marginHorizontal: 24, marginVertical: 8 },
-  signOutBtn:   { flexDirection: 'row', alignItems: 'center', paddingVertical: 16, paddingHorizontal: 24, gap: 14 },
+  menuTitle:       { fontSize: 22, fontWeight: '700', color: '#ffffff', marginTop: 4, textAlign: 'center' },
+  menuList:        { paddingTop: 8 },
+  menuItem:        { flexDirection: 'row', alignItems: 'center', paddingVertical: 16, paddingHorizontal: 24, gap: 14 },
+  menuIconWrap:    { width: 36, height: 36, borderRadius: 10, backgroundColor: '#eff6ff', alignItems: 'center', justifyContent: 'center' },
+  menuLabel:       { flex: 1, fontSize: 15, fontWeight: '500', color: '#111827' },
+  divider:         { height: 1, backgroundColor: '#f3f4f6', marginHorizontal: 24, marginVertical: 8 },
+  signOutBtn:      { flexDirection: 'row', alignItems: 'center', paddingVertical: 16, paddingHorizontal: 24, gap: 14 },
   signOutIconWrap: { width: 36, height: 36, borderRadius: 10, backgroundColor: '#fef2f2', alignItems: 'center', justifyContent: 'center' },
-  signOutLabel: { fontSize: 15, fontWeight: '600', color: '#ef4444' },
+  signOutLabel:    { fontSize: 15, fontWeight: '600', color: '#ef4444' },
 });
 
 // ── Header ──
@@ -137,13 +135,38 @@ const h = StyleSheet.create({
 export default function TabLayout() {
   const [menuVisible, setMenuVisible] = useState(false);
 
+  // ── Request notification permissions on app start ──
+  useEffect(() => {
+    const requestPermissions = async () => {
+      try {
+        const { status } = await Notifications.requestPermissionsAsync();
+        if (status !== 'granted') {
+          console.warn('⚠️ Notification permission not granted');
+        } else {
+          console.log('✅ Notification permission granted');
+        }
+      } catch (err) {
+        console.error('Error requesting notification permissions:', err);
+      }
+    };
+    requestPermissions();
+  }, []);
+
+  const { setUser, logActivity } = useApp();
+
   const handleLogout = async () => {
     setMenuVisible(false);
-    try {
-      await signOut(auth);
-    } catch (e) {
-      console.error(e);
-    }
+    // Clear local user so UI components (like SOS) can reset themselves on logout.
+    setUser({
+      firstName: '',
+      middleName: '',
+      lastName: '',
+      email: '',
+      phone: '',
+      city: '',
+      barangay: '',
+    });
+    logActivity({ type: 'logout', title: 'Logged Out', description: 'User signed out' });
     router.replace('/login');
   };
 
@@ -157,7 +180,6 @@ export default function TabLayout() {
     },
     headerTintColor: '#ffffff',
     headerTitleAlign: 'left' as const,
-    // Remove default padding so header fills full screen width
     headerLeftContainerStyle:  { paddingLeft: 0, width: 0 },
     headerTitleContainerStyle: { paddingLeft: 16, marginLeft: 0, left: 0, right: 0 },
     headerRightContainerStyle: { paddingRight: 0 },
@@ -196,7 +218,6 @@ export default function TabLayout() {
           tabBarIconStyle: { marginBottom: 0 },
         }}
       >
-        {/* Shorter, single-word labels so nothing overflows */}
         <Tabs.Screen
           name="index"
           options={{
@@ -229,10 +250,13 @@ export default function TabLayout() {
             tabBarIcon: ({ color }) => <Ionicons name="alert-circle-outline" size={24} color={color} />,
           }}
         />
-        {/* Hidden screens — accessible via side menu, not shown in tab bar */}
         <Tabs.Screen
           name="map"
-          options={{ href: null, ...sharedOptions('Map View') }}
+          options={{
+            title: 'Map',
+            ...sharedOptions('SOS Map'),
+            tabBarIcon: ({ color }) => <Ionicons name="map-outline" size={24} color={color} />,
+          }}
         />
         <Tabs.Screen
           name="water"

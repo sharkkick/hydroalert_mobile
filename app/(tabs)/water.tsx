@@ -19,12 +19,7 @@ function toX(i: number, total = DATA.length, cw = CW) { return PAD_L + (i / (tot
 function toY(v: number, ch = CH) { return PAD_T + (1 - v / MAX_V) * ch; }
 
 const SENSORS = [
-  { id: 'S-001', name: 'Upstream Bridge', value: 2.3, max: 4, change: '+0.2m', changeColor: '#3b82f6', barColor: '#3b82f6', trend: 'up',   critical: false, battery: 85,  status: 'NORMAL'   },
-  { id: 'S-002', name: 'Downtown Area',   value: 2.1, max: 4, change: '0.0m',  changeColor: '#6b7280', barColor: '#3b82f6', trend: 'flat', critical: false, battery: 72,  status: 'NORMAL'   },
-  { id: 'S-003', name: 'East Riverside',  value: 4.2, max: 4, change: '+0.8m', changeColor: '#ef4444', barColor: '#ef4444', trend: 'up',   critical: true,  battery: 91,  status: 'CRITICAL' },
-  { id: 'S-004', name: 'South Bridge',    value: 1.8, max: 4, change: '-0.1m', changeColor: '#16a34a', barColor: '#3b82f6', trend: 'down', critical: false, battery: 60,  status: 'NORMAL'   },
-  { id: 'S-005', name: 'North District',  value: 3.5, max: 4, change: '+0.4m', changeColor: '#3b82f6', barColor: '#3b82f6', trend: 'up',   critical: false, battery: 78,  status: 'WARNING'  },
-  { id: 'S-006', name: 'West Channel',    value: 2.4, max: 4, change: '0.0m',  changeColor: '#16a34a', barColor: '#3b82f6', trend: 'up',   critical: false, battery: 55,  status: 'NORMAL'   },
+  { id: 'S-001', name: 'Brgy. Medicion II-F', value: 2.3, max: 4, change: '+0.2m', changeColor: '#3b82f6', barColor: '#3b82f6', trend: 'up',   critical: false, battery: 85,  status: 'NORMAL'   },
 ];
 
 function ModalHeader({ title, onClose }: { title: string; onClose: () => void }) {
@@ -328,9 +323,9 @@ export default function WaterScreen() {
       {/* Stat Cards */}
       <View style={s.statsRow}>
         {[
-          { label: 'Average', value: '2.72m', iconBg: '#ecfeff', icon: <Ionicons name="water-outline" size={20} color="#06b6d4" />, onPress: () => setAvgModal(true) },
-          { label: 'Above',   value: '1',     iconBg: '#fef2f2', icon: <Ionicons name="trending-up"   size={20} color="#ef4444" />, onPress: () => setAboveModal(true) },
-          { label: 'Highest', value: '4.2m',  iconBg: '#fffbeb', icon: <Ionicons name="water"         size={20} color="#f59e0b" />, onPress: () => setHighestModal(true) },
+          { label: 'Average', value: '2.30m', iconBg: '#ecfeff', icon: <Ionicons name="water-outline" size={20} color="#06b6d4" />, onPress: () => setAvgModal(true) },
+          { label: 'Above',   value: '0',     iconBg: '#fef2f2', icon: <Ionicons name="trending-up"   size={20} color="#ef4444" />, onPress: () => setAboveModal(true) },
+          { label: 'Highest', value: '2.3m',  iconBg: '#fffbeb', icon: <Ionicons name="water"         size={20} color="#f59e0b" />, onPress: () => setHighestModal(true) },
         ].map(card => (
           <TouchableOpacity key={card.label} style={s.statCard} onPress={card.onPress} activeOpacity={0.7}>
             <View style={[s.statIconBox, { backgroundColor: card.iconBg }]}>{card.icon}</View>
@@ -343,7 +338,7 @@ export default function WaterScreen() {
       {/* Chart Card */}
       <View style={s.card}>
         <Text style={s.cardTitle}>24-Hour Water Level Trend</Text>
-        <Text style={s.cardSub}>Sensor S-003 (East Riverside)</Text>
+        <Text style={s.cardSub}>Sensor S-001 (Brgy. Medicion II-F)</Text>
         <View style={{ marginTop: 10, overflow: 'hidden' }}>
           <LineChart onPress={() => setChartModal(true)} />
         </View>

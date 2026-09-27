@@ -1,6 +1,7 @@
-import { View, Text, StyleSheet, ScrollView, Dimensions, Modal, TouchableOpacity } from 'react-native';
+import { View, Text, StyleSheet, ScrollView, Dimensions, Modal, TouchableOpacity, ActivityIndicator } from 'react-native';
 import { Ionicons, MaterialCommunityIcons } from '@expo/vector-icons';
-import { useState } from 'react';
+import { useState, useEffect } from 'react';
+import { getRainfallForecast, ForecastSummary, DayForecast } from '../../lib/sensor-api';
 
 const { width } = Dimensions.get('window');
 const CHART_W = width - 60;
@@ -372,6 +373,15 @@ export default function RainfallScreen() {
   const [alertsModal, setAlertsModal] = useState(false);
   const [barExpand, setBarExpand] = useState(false);
   const [lineExpand, setLineExpand] = useState(false);
+  const [forecast, setForecast] = useState<ForecastSummary | null>(null);
+  const [forecastLoading, setForecastLoading] = useState(true);
+  const [expandedDay, setExpandedDay] = useState<string | null>(null);
+
+  useEffect(() => {
+    getRainfallForecast()
+      .then(setForecast)
+      .finally(() => setForecastLoading(false));
+  }, []);
 
   const STAT_CARDS = [
     { label: 'Current Avg',  value: '8.5mm/hr', iconBg: '#eff6ff', icon: <Ionicons name="pulse" size={20} color="#3b82f6" />,                                          onPress: () => setAvgModal(true) },
@@ -382,6 +392,118 @@ export default function RainfallScreen() {
 
   return (
     <ScrollView style={s.container} contentContainerStyle={s.scroll} showsVerticalScrollIndicator={false}>
+
+      {/* Rain Forecast Section */}
+      <View style={s.card}>
+        <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8, marginBottom: 4 }}>
+          <MaterialCommunityIcons name="weather-partly-rainy" size={18} color="#2563eb" />
+          <Text style={s.cardTitle}>5-Day Rain Forecast</Text>
+        </View>
+        <Text style={{ fontSize: 11, color: '#9ca3af', marginBottom: 12 }}>Powered by OpenWeatherMap • Tap a day for hourly details</Text>
+
+        {forecastLoading ? (
+          <View style={{ paddingVertical: 24, alignItems: 'center' }}>
+            <ActivityIndicator size="small" color="#3b82f6" />
+            <Text style={{ fontSize: 12, color: '#9ca3af', marginTop: 6 }}>Loading forecast...</Text>
+          </View>
+        ) : forecast && forecast.days.length > 0 ? (
+          <View>
+            {/* Summary banner */}
+            <View style={[fc.summaryBox, {
+              backgroundColor: forecast.heavyRainExpected ? '#fee2e2' : forecast.rainExpected ? '#fffbeb' : '#dcfce7',
+              borderColor: forecast.heavyRainExpected ? '#fca5a5' : forecast.rainExpected ? '#fde68a' : '#86efac',
+            }]}>
+              <MaterialCommunityIcons
+                name={forecast.heavyRainExpected ? 'alert' : forecast.rainExpected ? 'weather-rainy' : 'weather-sunny'}
+                size={16}
+                color={forecast.heavyRainExpected ? '#dc2626' : forecast.rainExpected ? '#d97706' : '#16a34a'}
+              />
+              <Text style={[fc.summaryText, {
+                color: forecast.heavyRainExpected ? '#991b1b' : forecast.rainExpected ? '#92400e' : '#166534',
+              }]}>
+                {forecast.summaryText}
+              </Text>
+            </View>
+
+            {/* Day-by-day breakdown */}
+            {forecast.days.slice(0, 5).map(day => {
+              const hasRain = day.maxPop >= 0.3 || day.totalRain > 0.5;
+              const isHeavy = day.totalRain >= 15 || day.maxPop >= 0.8;
+              const isExpanded = expandedDay === day.date;
+
+              return (
+                <TouchableOpacity
+                  key={day.date}
+                  style={[fc.dayRow, isHeavy && fc.dayRowHeavy]}
+                  onPress={() => setExpandedDay(isExpanded ? null : day.date)}
+                  activeOpacity={0.7}
+                >
+                  <View style={fc.dayMain}>
+                    <View style={fc.dayLeft}>
+                      <Text style={fc.dayLabel}>{day.dayLabel}</Text>
+                      <Text style={fc.dayDate}>{day.date}</Text>
+                    </View>
+                    <View style={fc.dayCenter}>
+                      <MaterialCommunityIcons
+                        name={isHeavy ? 'weather-pouring' : hasRain ? 'weather-rainy' : day.dominantWeather === 'Clouds' ? 'weather-cloudy' : 'weather-sunny'}
+                        size={24}
+                        color={isHeavy ? '#dc2626' : hasRain ? '#2563eb' : '#f59e0b'}
+                      />
+                      <Text style={fc.dayWeather}>{day.dominantWeather}</Text>
+                    </View>
+                    <View style={fc.dayRight}>
+                      <View style={fc.popRow}>
+                        <Ionicons name="water" size={12} color={hasRain ? '#2563eb' : '#9ca3af'} />
+                        <Text style={[fc.popText, { color: isHeavy ? '#dc2626' : hasRain ? '#2563eb' : '#9ca3af' }]}>
+                          {Math.round(day.maxPop * 100)}%
+                        </Text>
+                      </View>
+                      {day.totalRain > 0 && (
+                        <Text style={fc.rainAmount}>{day.totalRain}mm</Text>
+                      )}
+                    </View>
+                    <View style={fc.dayTemp}>
+                      <Text style={fc.tempHigh}>{day.maxTemp}°</Text>
+                      <Text style={fc.tempLow}>{day.minTemp}°</Text>
+                    </View>
+                    <Ionicons name={isExpanded ? 'chevron-up' : 'chevron-down'} size={14} color="#9ca3af" />
+                  </View>
+
+                  {/* Expanded hourly details */}
+                  {isExpanded && (
+                    <View style={fc.hourlySection}>
+                      <View style={fc.hourlyHeader}>
+                        <Text style={[fc.hourlyTh, { flex: 1 }]}>Time</Text>
+                        <Text style={[fc.hourlyTh, { flex: 1.5 }]}>Weather</Text>
+                        <Text style={[fc.hourlyTh, { flex: 0.7 }]}>Temp</Text>
+                        <Text style={[fc.hourlyTh, { flex: 0.7 }]}>Rain%</Text>
+                        <Text style={[fc.hourlyTh, { flex: 0.7 }]}>Rain</Text>
+                      </View>
+                      {day.entries.map(entry => (
+                        <View key={entry.dt} style={fc.hourlyRow}>
+                          <Text style={[fc.hourlyTd, { flex: 1, fontWeight: '600' }]}>{entry.time}</Text>
+                          <Text style={[fc.hourlyTd, { flex: 1.5 }]} numberOfLines={1}>{entry.description}</Text>
+                          <Text style={[fc.hourlyTd, { flex: 0.7 }]}>{entry.temp}°</Text>
+                          <Text style={[fc.hourlyTd, { flex: 0.7, color: entry.pop >= 0.5 ? '#2563eb' : '#6b7280', fontWeight: entry.pop >= 0.5 ? '700' : '400' }]}>
+                            {Math.round(entry.pop * 100)}%
+                          </Text>
+                          <Text style={[fc.hourlyTd, { flex: 0.7, color: entry.rainVolume > 0 ? '#2563eb' : '#9ca3af' }]}>
+                            {entry.rainVolume > 0 ? `${entry.rainVolume}mm` : '—'}
+                          </Text>
+                        </View>
+                      ))}
+                    </View>
+                  )}
+                </TouchableOpacity>
+              );
+            })}
+          </View>
+        ) : (
+          <Text style={{ fontSize: 12, color: '#9ca3af', textAlign: 'center', paddingVertical: 16 }}>
+            Unable to load forecast data. Check your internet connection.
+          </Text>
+        )}
+      </View>
 
       <View style={s.statsGrid}>
         {STAT_CARDS.map(card => (
@@ -496,4 +618,29 @@ const s = StyleSheet.create({
   td: { fontSize: 12, color: '#374151' },
   statusPill: { borderRadius: 20, paddingHorizontal: 8, paddingVertical: 3, alignSelf: 'flex-start' },
   statusText: { fontSize: 10, fontWeight: '600' },
+});
+
+const fc = StyleSheet.create({
+  summaryBox:    { flexDirection: 'row', alignItems: 'center', gap: 8, borderRadius: 10, padding: 12, borderWidth: 1, marginBottom: 12 },
+  summaryText:   { flex: 1, fontSize: 13, fontWeight: '600', lineHeight: 19 },
+  dayRow:        { backgroundColor: '#f9fafb', borderRadius: 12, marginBottom: 8, padding: 12, borderWidth: 1, borderColor: '#f3f4f6' },
+  dayRowHeavy:   { backgroundColor: '#fef2f2', borderColor: '#fecaca' },
+  dayMain:       { flexDirection: 'row', alignItems: 'center', gap: 8 },
+  dayLeft:       { width: 72 },
+  dayLabel:      { fontSize: 13, fontWeight: '700', color: '#111827' },
+  dayDate:       { fontSize: 10, color: '#9ca3af', marginTop: 1 },
+  dayCenter:     { alignItems: 'center', width: 54 },
+  dayWeather:    { fontSize: 9, color: '#6b7280', marginTop: 2, textAlign: 'center' },
+  dayRight:      { alignItems: 'center', width: 44 },
+  popRow:        { flexDirection: 'row', alignItems: 'center', gap: 3 },
+  popText:       { fontSize: 12, fontWeight: '700' },
+  rainAmount:    { fontSize: 9, color: '#6b7280', marginTop: 1 },
+  dayTemp:       { alignItems: 'center', width: 36 },
+  tempHigh:      { fontSize: 13, fontWeight: '700', color: '#111827' },
+  tempLow:       { fontSize: 11, color: '#9ca3af' },
+  hourlySection: { marginTop: 10, borderTopWidth: 1, borderColor: '#e5e7eb', paddingTop: 8 },
+  hourlyHeader:  { flexDirection: 'row', paddingVertical: 4, marginBottom: 2 },
+  hourlyTh:      { fontSize: 9, fontWeight: '700', color: '#9ca3af', letterSpacing: 0.3 },
+  hourlyRow:     { flexDirection: 'row', paddingVertical: 5, borderBottomWidth: 0.5, borderColor: '#f3f4f6', alignItems: 'center' },
+  hourlyTd:      { fontSize: 11, color: '#374151' },
 });

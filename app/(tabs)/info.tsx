@@ -1,26 +1,7 @@
-import { View, Text, StyleSheet, ScrollView, TouchableOpacity } from 'react-native';
+import { View, Text, StyleSheet, ScrollView, TouchableOpacity, ActivityIndicator } from 'react-native';
 import { Ionicons, MaterialCommunityIcons } from '@expo/vector-icons';
-import { useState } from 'react';
-
-// ── Replace with real Firebase data ──
-const LOCATIONS = [
-  {
-    barangay: 'Brgy. Medicion II-F',
-    area: 'Imus, Cavite',
-    sensors: [
-      { id: 'S-001', spot: 'Near Palengke / Drainage Area',  water: 2.3, rainfall: 5,  status: 'normal'   },
-      { id: 'S-002', spot: 'Riverside Accumulation Zone',     water: 2.8, rainfall: 12, status: 'warning'  },
-    ],
-  },
-  {
-    barangay: 'Brgy. Pag-asa III',
-    area: 'Imus, Cavite',
-    sensors: [
-      { id: 'S-003', spot: 'Low-lying Street / Flood Basin',  water: 4.2, rainfall: 22, status: 'critical' },
-      { id: 'S-004', spot: 'Near Perimeter Road',             water: 1.8, rainfall: 3,  status: 'normal'   },
-    ],
-  },
-];
+import { useState, useEffect, useCallback } from 'react';
+import { getLatestSensorReading, getCurrentRainfall, getWaterLevelStatus, getRainfallWarning, type SensorReading } from '../../lib/sensor-api';
 
 const STATUS = {
   normal:   { label: 'Normal',  color: '#16a34a', bg: '#dcfce7', border: '#86efac', icon: 'checkmark-circle'  as const },
@@ -28,12 +9,9 @@ const STATUS = {
   critical: { label: 'Danger',  color: '#dc2626', bg: '#fee2e2', border: '#fca5a5', icon: 'alert-circle'      as const },
 };
 
-const FILTERS = ['All', 'Normal', 'Warning', 'Danger'] as const;
-type Filter = typeof FILTERS[number];
-
-function WaterBar({ level, status }: { level: number; status: string }) {
-  const pct = Math.min((level / 5) * 100, 100);
-  const st  = STATUS[status as keyof typeof STATUS];
+function WaterBar({ level, max, status }: { level: number; max: number; status: string }) {
+  const pct = Math.min((level / max) * 100, 100);
+  const st  = STATUS[status as keyof typeof STATUS] || STATUS.normal;
   return (
     <View style={b.track}>
       <View style={[b.fill, { width: `${pct}%` as any, backgroundColor: st.color }]} />
@@ -41,182 +19,165 @@ function WaterBar({ level, status }: { level: number; status: string }) {
   );
 }
 
-function getOverall(sensors: typeof LOCATIONS[0]['sensors']) {
-  if (sensors.some(s => s.status === 'critical')) return 'critical';
-  if (sensors.some(s => s.status === 'warning'))  return 'warning';
-  return 'normal';
-}
-
 export default function FloodStatusScreen() {
-  const [filter,   setFilter]   = useState<Filter>('All');
+  const [loading, setLoading] = useState(true);
+  const [sensorData, setSensorData] = useState<SensorReading | null>(null);
+  const [rainfall, setRainfall] = useState<{ current: number; description: string }>({ current: 0, description: '' });
   const [expanded, setExpanded] = useState<string | null>(null);
 
-  const allSensors = LOCATIONS.flatMap(l => l.sensors);
-  const counts = {
-    total:    allSensors.length,
-    critical: allSensors.filter(s => s.status === 'critical').length,
-    warning:  allSensors.filter(s => s.status === 'warning').length,
-    normal:   allSensors.filter(s => s.status === 'normal').length,
-  };
+  const fetchData = useCallback(async () => {
+    const [sensor, rain] = await Promise.all([
+      getLatestSensorReading('S-001'),
+      getCurrentRainfall(),
+    ]);
+    setSensorData(sensor);
+    setRainfall(rain);
+    setLoading(false);
+  }, []);
 
-  const filtered = LOCATIONS.map(loc => ({
-    ...loc,
-    sensors: loc.sensors.filter(s => {
-      if (filter === 'All')     return true;
-      if (filter === 'Normal')  return s.status === 'normal';
-      if (filter === 'Warning') return s.status === 'warning';
-      if (filter === 'Danger')  return s.status === 'critical';
-      return true;
-    }),
-  })).filter(l => l.sensors.length > 0);
+  useEffect(() => {
+    fetchData();
+    const interval = setInterval(fetchData, 15000); // refresh every 15s
+    return () => clearInterval(interval);
+  }, [fetchData]);
+
+  const waterLevelMm = sensorData ? Math.round(sensorData.water_level_cm * 10) / 10 : 0;
+  const waterStatus = getWaterLevelStatus(waterLevelMm);
+  const rainfallWarning = getRainfallWarning(rainfall.current);
+  const overallStatus = waterStatus.status;
+  const st = STATUS[overallStatus] || STATUS.normal;
+
+  if (loading) {
+    return (
+      <View style={[s.container, { justifyContent: 'center', alignItems: 'center' }]}>
+        <ActivityIndicator size="large" color="#2563eb" />
+        <Text style={{ marginTop: 12, color: '#6b7280' }}>Loading sensor data...</Text>
+      </View>
+    );
+  }
+
+  const lastUpdated = sensorData?.timestamp
+    ? new Date(sensorData.timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
+    : '--';
 
   return (
     <ScrollView style={s.container} contentContainerStyle={s.scroll} showsVerticalScrollIndicator={false}>
 
       {/* Summary strip */}
       <View style={s.summaryRow}>
+        <View style={[s.sumCard, { backgroundColor: st.bg }]}>
+          <Ionicons name={st.icon} size={18} color={st.color} />
+          <Text style={[s.sumVal, { color: st.color }]}>{waterStatus.label}</Text>
+          <Text style={[s.sumLbl, { color: st.color }]}>Water Level</Text>
+        </View>
+        <View style={[s.sumCard, { backgroundColor: rainfallWarning.bg }]}>
+          <MaterialCommunityIcons name="weather-rainy" size={18} color={rainfallWarning.color} />
+          <Text style={[s.sumVal, { color: rainfallWarning.color }]}>{rainfall.current}</Text>
+          <Text style={[s.sumLbl, { color: rainfallWarning.color }]}>mm/hr</Text>
+        </View>
         <View style={[s.sumCard, { backgroundColor: '#f1f5f9' }]}>
-          <Text style={s.sumVal}>{counts.total}</Text>
-          <Text style={s.sumLbl}>Sensors</Text>
-        </View>
-        <View style={[s.sumCard, { backgroundColor: '#fee2e2' }]}>
-          <Text style={[s.sumVal, { color: '#dc2626' }]}>{counts.critical}</Text>
-          <Text style={[s.sumLbl, { color: '#dc2626' }]}>Danger</Text>
-        </View>
-        <View style={[s.sumCard, { backgroundColor: '#ffedd5' }]}>
-          <Text style={[s.sumVal, { color: '#ea580c' }]}>{counts.warning}</Text>
-          <Text style={[s.sumLbl, { color: '#ea580c' }]}>Warning</Text>
-        </View>
-        <View style={[s.sumCard, { backgroundColor: '#dcfce7' }]}>
-          <Text style={[s.sumVal, { color: '#16a34a' }]}>{counts.normal}</Text>
-          <Text style={[s.sumLbl, { color: '#16a34a' }]}>Normal</Text>
+          <Ionicons name="time-outline" size={18} color="#6b7280" />
+          <Text style={s.sumVal}>{lastUpdated}</Text>
+          <Text style={s.sumLbl}>Updated</Text>
         </View>
       </View>
 
-      {/* Filter */}
-      <View style={s.filterRow}>
-        {FILTERS.map(f => (
-          <TouchableOpacity
-            key={f}
-            style={[s.filterBtn, filter === f && s.filterActive]}
-            onPress={() => setFilter(f)}
-            activeOpacity={0.7}
-          >
-            <Text style={[s.filterText, filter === f && s.filterTextActive]}>{f}</Text>
-          </TouchableOpacity>
-        ))}
-      </View>
+      {/* Sensor Card */}
+      <TouchableOpacity
+        style={[s.card, { borderLeftColor: st.color, borderLeftWidth: 4 }]}
+        onPress={() => setExpanded(expanded ? null : 'S-001')}
+        activeOpacity={0.85}
+      >
+        {/* Header */}
+        <View style={s.cardHeader}>
+          <View style={[s.locIcon, { backgroundColor: st.bg }]}>
+            <Ionicons name="location" size={16} color={st.color} />
+          </View>
+          <View style={s.cardMid}>
+            <Text style={s.brgName}>Brgy. Medicion II-F</Text>
+            <Text style={s.brgArea}>Imus, Cavite · S-001</Text>
+          </View>
+          <View style={s.cardRight}>
+            <View style={[s.badge, { backgroundColor: st.bg }]}>
+              <Ionicons name={st.icon} size={11} color={st.color} />
+              <Text style={[s.badgeText, { color: st.color }]}>{st.label}</Text>
+            </View>
+            <Ionicons name={expanded ? 'chevron-up' : 'chevron-down'} size={15} color="#9ca3af" style={{ marginTop: 4 }} />
+          </View>
+        </View>
 
-      {/* Location cards */}
-      {filtered.map(loc => {
-        const overall  = getOverall(loc.sensors);
-        const st       = STATUS[overall];
-        const isOpen   = expanded === loc.barangay;
-        const highest  = [...loc.sensors].sort((a, b) => b.water - a.water)[0];
+        {/* Collapsed preview */}
+        {!expanded && (
+          <View style={s.preview}>
+            <View style={s.previewItem}>
+              <Ionicons name="water-outline" size={13} color={waterStatus.color} />
+              <Text style={[s.previewVal, { color: waterStatus.color }]}>{waterLevelMm}mm</Text>
+              <Text style={s.previewLbl}>water level</Text>
+            </View>
+            <View style={s.previewItem}>
+              <MaterialCommunityIcons name="weather-rainy" size={13} color={rainfallWarning.color} />
+              <Text style={[s.previewVal, { color: rainfallWarning.color }]}>{rainfall.current}mm/hr</Text>
+              <Text style={s.previewLbl}>rainfall</Text>
+            </View>
+          </View>
+        )}
 
-        return (
-          <TouchableOpacity
-            key={loc.barangay}
-            style={[s.card, { borderLeftColor: st.color, borderLeftWidth: 4 }]}
-            onPress={() => setExpanded(isOpen ? null : loc.barangay)}
-            activeOpacity={0.85}
-          >
-            {/* Header */}
-            <View style={s.cardHeader}>
-              <View style={[s.locIcon, { backgroundColor: st.bg }]}>
-                <Ionicons name="location" size={16} color={st.color} />
-              </View>
-              <View style={s.cardMid}>
-                <Text style={s.brgName}>{loc.barangay}</Text>
-                <Text style={s.brgArea}>{loc.area}</Text>
-              </View>
-              <View style={s.cardRight}>
-                <View style={[s.badge, { backgroundColor: st.bg }]}>
-                  <Ionicons name={st.icon} size={11} color={st.color} />
-                  <Text style={[s.badgeText, { color: st.color }]}>{st.label}</Text>
-                </View>
-                <Ionicons name={isOpen ? 'chevron-up' : 'chevron-down'} size={15} color="#9ca3af" style={{ marginTop: 4 }} />
+        {/* Expanded details */}
+        {expanded && (
+          <View style={s.sensorBlock}>
+            <View style={s.sensorHead}>
+              <Text style={s.sensorId}>S-001</Text>
+              <View style={[s.miniBadge, { backgroundColor: st.bg }]}>
+                <Text style={[s.miniBadgeText, { color: st.color }]}>{st.label}</Text>
               </View>
             </View>
 
-            {/* Collapsed preview */}
-            {!isOpen && (
-              <View style={s.preview}>
-                <View style={s.previewItem}>
-                  <Ionicons name="water-outline" size={13} color={STATUS[highest.status as keyof typeof STATUS].color} />
-                  <Text style={[s.previewVal, { color: STATUS[highest.status as keyof typeof STATUS].color }]}>{highest.water}m</Text>
-                  <Text style={s.previewLbl}>water level</Text>
-                </View>
-                <View style={s.previewItem}>
-                  <MaterialCommunityIcons name="weather-rainy" size={13} color="#2563eb" />
-                  <Text style={[s.previewVal, { color: '#2563eb' }]}>{highest.rainfall}mm/hr</Text>
-                  <Text style={s.previewLbl}>rainfall</Text>
-                </View>
-                <Text style={s.previewCount}>{loc.sensors.length} sensor{loc.sensors.length > 1 ? 's' : ''}</Text>
+            {/* Water level */}
+            <View style={s.metric}>
+              <View style={s.metricTop}>
+                <Ionicons name="water-outline" size={12} color={waterStatus.color} />
+                <Text style={s.metricLbl}>Water Level</Text>
+                <Text style={[s.metricNum, { color: waterStatus.color }]}>{waterLevelMm}mm</Text>
               </View>
-            )}
+              <WaterBar level={waterLevelMm} max={100} status={overallStatus} />
+              {waterLevelMm >= 75 && (
+                <Text style={s.overThreshold}>Above danger threshold (75mm) — Evacuation may be needed</Text>
+              )}
+            </View>
 
-            {/* Expanded sensors */}
-            {isOpen && loc.sensors.map((sensor, i) => {
-              const sst = STATUS[sensor.status as keyof typeof STATUS];
-              const rainCat = sensor.rainfall >= 30 ? 'Extreme' : sensor.rainfall >= 15 ? 'Heavy' : sensor.rainfall >= 7.5 ? 'Moderate' : 'Light';
-              const rainColor = sensor.rainfall >= 30 ? '#dc2626' : sensor.rainfall >= 15 ? '#ea580c' : sensor.rainfall >= 7.5 ? '#ca8a04' : '#2563eb';
-              return (
-                <View key={sensor.id} style={[s.sensorBlock, i > 0 && s.sensorBorder]}>
-                  {/* Sensor ID + spot */}
-                  <View style={s.sensorHead}>
-                    <Text style={s.sensorId}>{sensor.id}</Text>
-                    <View style={[s.miniBadge, { backgroundColor: sst.bg }]}>
-                      <Text style={[s.miniBadgeText, { color: sst.color }]}>{sst.label}</Text>
-                    </View>
-                  </View>
-                  <Text style={s.sensorSpot}>{sensor.spot}</Text>
+            {/* Rainfall */}
+            <View style={s.metric}>
+              <View style={s.metricTop}>
+                <MaterialCommunityIcons name="weather-rainy" size={12} color={rainfallWarning.color} />
+                <Text style={s.metricLbl}>Rainfall ({rainfallWarning.level})</Text>
+                <Text style={[s.metricNum, { color: rainfallWarning.color }]}>{rainfall.current}mm/hr</Text>
+              </View>
+              <View style={b.track}>
+                <View style={[b.fill, { width: `${Math.min((rainfall.current / 40) * 100, 100)}%` as any, backgroundColor: rainfallWarning.color }]} />
+              </View>
+              <Text style={{ fontSize: 11, color: '#6b7280', marginTop: 3 }}>{rainfall.description}</Text>
+            </View>
 
-                  {/* Water level */}
-                  <View style={s.metric}>
-                    <View style={s.metricTop}>
-                      <Ionicons name="water-outline" size={12} color={sst.color} />
-                      <Text style={s.metricLbl}>Water Level</Text>
-                      <Text style={[s.metricNum, { color: sst.color }]}>{sensor.water}m / 5.0m</Text>
-                    </View>
-                    <WaterBar level={sensor.water} status={sensor.status} />
-                    {sensor.water >= 4.0 && (
-                      <Text style={s.overThreshold}>Above critical threshold (4.0m) — Evacuation may be needed</Text>
-                    )}
-                  </View>
-
-                  {/* Rainfall */}
-                  <View style={s.metric}>
-                    <View style={s.metricTop}>
-                      <MaterialCommunityIcons name="weather-rainy" size={12} color={rainColor} />
-                      <Text style={s.metricLbl}>Rainfall</Text>
-                      <Text style={[s.metricNum, { color: rainColor }]}>{sensor.rainfall}mm/hr — {rainCat}</Text>
-                    </View>
-                    <View style={b.track}>
-                      <View style={[b.fill, { width: `${Math.min((sensor.rainfall / 40) * 100, 100)}%` as any, backgroundColor: rainColor }]} />
-                    </View>
-                  </View>
-                </View>
-              );
-            })}
-          </TouchableOpacity>
-        );
-      })}
-
-      {filtered.length === 0 && (
-        <View style={s.empty}>
-          <Ionicons name="checkmark-circle-outline" size={48} color="#d1d5db" />
-          <Text style={s.emptyTitle}>No {filter.toLowerCase()} sensors right now</Text>
-          <Text style={s.emptySub}>All monitored areas are at a different level.</Text>
-        </View>
-      )}
+            {/* Coordinates */}
+            <View style={{ flexDirection: 'row', gap: 16, marginTop: 4 }}>
+              <Text style={{ fontSize: 11, color: '#9ca3af' }}>Lat: {sensorData?.latitude?.toFixed(4)}</Text>
+              <Text style={{ fontSize: 11, color: '#9ca3af' }}>Lon: {sensorData?.longitude?.toFixed(4)}</Text>
+            </View>
+          </View>
+        )}
+      </TouchableOpacity>
 
       {/* Legend */}
       <View style={s.legendCard}>
-        <Text style={s.legendTitle}>About the water level scale</Text>
-        <Text style={s.legendBody}>Each sensor measures water depth up to 5.0 meters. The critical threshold is 4.0m — above this, flooding is likely and evacuation may be required.</Text>
+        <Text style={s.legendTitle}>What do these levels mean?</Text>
+        <Text style={s.legendBody}>Use this to understand the colors and numbers in the cards above.</Text>
         <View style={s.legendItems}>
-          {[{ label: 'Below 2.0m — Normal', color: '#16a34a' }, { label: '2.0–3.9m — Warning', color: '#ea580c' }, { label: '4.0m and above — Danger', color: '#dc2626' }].map(l => (
+          {[
+            { label: '0 – 29 mm — Safe', color: '#16a34a' },
+            { label: '30 – 49 mm — Watch', color: '#ca8a04' },
+            { label: '50 – 74 mm — Warning', color: '#ea580c' },
+            { label: '75 mm or more — Danger', color: '#dc2626' },
+          ].map(l => (
             <View key={l.label} style={s.legendItem}>
               <View style={[s.legendDot, { backgroundColor: l.color }]} />
               <Text style={s.legendItemText}>{l.label}</Text>

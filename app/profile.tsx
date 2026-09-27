@@ -5,7 +5,7 @@ import {
 } from 'react-native';
 import { router } from 'expo-router';
 import { Ionicons } from '@expo/vector-icons';
-import { useApp } from './AppContext';
+import { useApp } from './app-context';
 
 const { width } = Dimensions.get('window');
 
@@ -83,6 +83,9 @@ export default function ProfileScreen() {
   const handleSignOut = () => {
     if (Platform.OS === 'web') {
       if (window.confirm('Are you sure you want to sign out?')) {
+        setUser({
+          firstName: '', middleName: '', lastName: '', email: '', phone: '', city: '', barangay: ''
+        });
         logActivity({ type: 'logout', title: 'Logged Out', description: 'User signed out' });
         router.replace('/login');
       }
@@ -90,27 +93,14 @@ export default function ProfileScreen() {
       Alert.alert('Sign Out', 'Are you sure you want to sign out?', [
         { text: 'Cancel', style: 'cancel' },
         { text: 'Sign Out', style: 'destructive', onPress: () => {
+          setUser({ firstName: '', middleName: '', lastName: '', email: '', phone: '', city: '', barangay: '' });
           logActivity({ type: 'logout', title: 'Logged Out', description: 'User signed out' });
           router.replace('/login');
         }},
+
       ]);
     }
   };
-
-  const Field = ({ label, value, field, keyboardType = 'default', editable = true }: any) => (
-    <View style={s.fieldGroup}>
-      <Text style={s.fieldLabel}>{label}</Text>
-      <TextInput
-        style={[s.fieldInput, !editing && s.fieldInputDisabled]}
-        value={form[field as keyof typeof form]}
-        onChangeText={v => setForm(prev => ({ ...prev, [field]: v }))}
-        editable={editing && editable}
-        keyboardType={keyboardType}
-        autoCapitalize="none"
-        placeholderTextColor="#9ca3af"
-      />
-    </View>
-  );
 
   const SelectField = ({ label, value, placeholder, onPress, enabled }: any) => (
     <View style={s.fieldGroup}>
@@ -168,10 +158,47 @@ export default function ProfileScreen() {
             )}
           </View>
 
-          <Field label="First Name"   field="firstName"  />
-          <Field label="Middle Name"  field="middleName" />
-          <Field label="Last Name"    field="lastName"   />
-          <Field label="Phone"        field="phone"      keyboardType="phone-pad" />
+          <View style={s.fieldGroup}>
+            <Text style={s.fieldLabel}>First Name</Text>
+            <TextInput
+              style={[s.fieldInput, !editing && s.fieldInputDisabled]}
+              value={form.firstName}
+              onChangeText={v => setForm(prev => ({ ...prev, firstName: v }))}
+              editable={editing}
+              placeholderTextColor="#9ca3af"
+            />
+          </View>
+          <View style={s.fieldGroup}>
+            <Text style={s.fieldLabel}>Middle Name</Text>
+            <TextInput
+              style={[s.fieldInput, !editing && s.fieldInputDisabled]}
+              value={form.middleName}
+              onChangeText={v => setForm(prev => ({ ...prev, middleName: v }))}
+              editable={editing}
+              placeholderTextColor="#9ca3af"
+            />
+          </View>
+          <View style={s.fieldGroup}>
+            <Text style={s.fieldLabel}>Last Name</Text>
+            <TextInput
+              style={[s.fieldInput, !editing && s.fieldInputDisabled]}
+              value={form.lastName}
+              onChangeText={v => setForm(prev => ({ ...prev, lastName: v }))}
+              editable={editing}
+              placeholderTextColor="#9ca3af"
+            />
+          </View>
+          <View style={s.fieldGroup}>
+            <Text style={s.fieldLabel}>Phone</Text>
+            <TextInput
+              style={[s.fieldInput, !editing && s.fieldInputDisabled]}
+              value={form.phone}
+              onChangeText={v => setForm(prev => ({ ...prev, phone: v }))}
+              editable={editing}
+              keyboardType="phone-pad"
+              placeholderTextColor="#9ca3af"
+            />
+          </View>
 
           {/* Province - locked */}
           <View style={s.fieldGroup}>

@@ -6,7 +6,7 @@ import {
 } from 'react-native';
 import { router } from 'expo-router';
 import { Ionicons } from '@expo/vector-icons';
-import { useApp } from './AppContext';
+import { useApp } from './app-context';
 
 const TYPE_CONFIG = {
   login: {

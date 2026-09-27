@@ -1,7 +1,9 @@
 import { View, Text, StyleSheet, ScrollView, TouchableOpacity, Alert, Dimensions, Animated, Modal } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
-import { useState, useRef } from 'react';
-import { useApp } from '../AppContext';
+import React, { useState, useRef, useEffect } from 'react';
+import { useApp } from '../app-context';
+import { supabase } from '../../lib/supabase';
+import * as Location from 'expo-location';
 
 const { width } = Dimensions.get('window');
 
@@ -21,8 +23,340 @@ const HOTLINES = [
   { label: 'Red Cross',          number: '143' },
 ];
 
+function readableSupabaseError(error: any): string {
+  if (!error) return 'Unknown error.';
+  const message = String(error.message || error.error_description || error.details || 'Unknown error.');
+  if (message.toLowerCase().includes('row-level security')) {
+    return 'Permission denied by Supabase RLS policy.';
+  }
+  return message;
+}
+
+function getMissingColumnName(error: any): string | null {
+  if (!error || error.code !== 'PGRST204') return null;
+  const message = String(error.message || '');
+  const match = message.match(/Could not find the '([^']+)' column/i);
+  return match?.[1] ?? null;
+}
+
+function peopleToNumber(value: string | null): number | null {
+  if (!value) return null;
+  if (value === '1') return 1;
+  if (value === '2-5') return 5;
+  if (value === '6-10') return 10;
+  if (value === '10+') return 10;
+  const parsed = Number(value);
+  return Number.isFinite(parsed) ? parsed : null;
+}
+
+async function upsertProfileRow(tableName: string, payload: Record<string, any>) {
+  const payloadAttempts: Array<Record<string, any>> = [
+    { ...payload },
+    {
+      user_id: payload.user_id,
+      first_name: payload.first_name,
+      last_name: payload.last_name,
+      full_name: payload.full_name,
+      email: payload.email,
+    },
+    {
+      user_id: payload.user_id,
+      email: payload.email,
+    },
+    {
+      user_id: payload.user_id,
+    },
+  ];
+
+  let lastError: any = null;
+
+  for (const rawAttempt of payloadAttempts) {
+    const attempt = Object.fromEntries(Object.entries(rawAttempt).filter(([, value]) => value !== undefined));
+
+    if (!attempt.user_id) {
+      continue;
+    }
+
+    for (let i = 0; i < 8; i++) {
+      const { error: upsertError } = await supabase
+        .from(tableName)
+        .upsert(attempt, { onConflict: 'user_id' });
+
+      if (!upsertError) {
+        return;
+      }
+
+      const missingColumn = getMissingColumnName(upsertError);
+      if (missingColumn && Object.prototype.hasOwnProperty.call(attempt, missingColumn)) {
+        delete attempt[missingColumn];
+        if (Object.keys(attempt).length === 0) {
+          lastError = upsertError;
+          break;
+        }
+        continue;
+      }
+
+      // Fallback for schemas that don't support upsert by user_id.
+      const noConflictSupport = String(upsertError.message || '').toLowerCase().includes('no unique or exclusion constraint');
+      if (upsertError.code === '42P10' || noConflictSupport) {
+        const { error: insertError } = await supabase
+          .from(tableName)
+          .insert(attempt);
+
+        if (!insertError || insertError.code === '23505') {
+          return;
+        }
+
+        const insertMissingColumn = getMissingColumnName(insertError);
+        if (insertMissingColumn && Object.prototype.hasOwnProperty.call(attempt, insertMissingColumn)) {
+          delete attempt[insertMissingColumn];
+          if (Object.keys(attempt).length === 0) {
+            lastError = insertError;
+            break;
+          }
+          continue;
+        }
+
+        lastError = insertError;
+        break;
+      }
+
+      // If table doesn't exist in PostgREST cache, skip this table attempt.
+      if (upsertError.code === 'PGRST205' || upsertError.code === '42P01') {
+        return;
+      }
+
+      lastError = upsertError;
+      break;
+    }
+  }
+
+  throw lastError ?? new Error(`Unable to create profile row in ${tableName}.`);
+}
+
+async function ensureUserProfileForSos(params: {
+  authUserId: string;
+  authEmail?: string;
+  user: {
+    firstName?: string;
+    middleName?: string;
+    lastName?: string;
+    email?: string;
+    phone?: string;
+    city?: string;
+    barangay?: string;
+    roleId?: number | null;
+    barangayId?: number | null;
+    fcmToken?: string;
+  };
+}) {
+  const firstName = params.user.firstName?.trim() || 'Resident';
+  const middleName = params.user.middleName?.trim() || '';
+  const lastName = params.user.lastName?.trim() || 'User';
+  const fullName = `${firstName}${middleName ? ` ${middleName}` : ''} ${lastName}`.trim();
+  const email = (params.authEmail || params.user.email || '').trim().toLowerCase();
+
+  if (!email) {
+    throw new Error('Authenticated user email is missing; cannot create SOS profile.');
+  }
+
+  const payload = {
+    user_id: params.authUserId,
+    first_name: firstName,
+    middle_name: middleName,
+    last_name: lastName,
+    full_name: fullName,
+    email,
+    phone_number: params.user.phone?.trim() || '',
+    province: 'Cavite',
+    city: params.user.city?.trim() || '',
+    barangay: params.user.barangay?.trim() || '',
+    street: '',
+    role_id: params.user.roleId ?? null,
+    barangay_id: params.user.barangayId ?? null,
+    fcm_token: params.user.fcmToken || '',
+  };
+
+  // Keep users in sync for app profile reads.
+  await upsertProfileRow('users', payload);
+
+  // FK on v_sos_alerts references v_users.user_id in this schema.
+  await upsertProfileRow('v_users', payload);
+}
+
+async function insertSosAlert(params: {
+  authUserId: string;
+  latitude?: number;
+  longitude?: number;
+}) {
+  const lat = params.latitude ?? 0;
+  const lng = params.longitude ?? 0;
+
+  const attempts: Array<{
+    table: string;
+    idColumn: string;
+    payload: Record<string, any>;
+  }> = [
+    {
+      table: 'sos_alerts',
+      idColumn: 'sos_id',
+      payload: {
+        user_id: params.authUserId,
+        latitude: lat,
+        longitude: lng,
+        status_id: 1,
+      },
+    },
+    {
+      table: 'sos_alerts',
+      idColumn: 'sos_id',
+      payload: {
+        user_id: params.authUserId,
+        status_id: 1,
+      },
+    },
+    {
+      table: 'v_sos_alerts',
+      idColumn: 'sos_id',
+      payload: {
+        user_id: params.authUserId,
+        latitude: lat,
+        longitude: lng,
+        status_id: 1,
+      },
+    },
+  ];
+
+  let lastError: any = null;
+  for (const attempt of attempts) {
+    const payload = { ...attempt.payload };
+
+    for (let i = 0; i < 8; i++) {
+      const { data, error } = await supabase
+        .from(attempt.table)
+        .insert(payload)
+        .select('*')
+        .maybeSingle();
+
+      if (!error) {
+        const dbId = (data as Record<string, any> | null)?.[attempt.idColumn] ?? (data as Record<string, any> | null)?.sos_id ?? null;
+        return {
+          table: attempt.table,
+          idColumn: attempt.idColumn,
+          id: dbId,
+        };
+      }
+
+      // Log detailed error for debugging
+      try {
+        console.error('Supabase insert error', { table: attempt.table, payload, error });
+      } catch (logErr) {
+        console.error('Failed to log supabase error', logErr);
+      }
+
+      const missingColumn = getMissingColumnName(error);
+      if (missingColumn && Object.prototype.hasOwnProperty.call(payload, missingColumn)) {
+        delete payload[missingColumn];
+        if (Object.keys(payload).length === 0) {
+          lastError = error;
+          break;
+        }
+        continue;
+      }
+
+      lastError = error;
+      break;
+    }
+  }
+
+  throw lastError ?? new Error('Unable to insert SOS alert into Supabase.');
+}
+
+async function lookupSituationTypeId(situationName: string): Promise<number | null> {
+  const tableNames = ['v_situation_types', 'situation_types'];
+  const idColumns = ['situation_type_id', 'id'];
+  const nameColumns = ['situation_type', 'situation_name', 'name', 'type_name'];
+
+  for (const tableName of tableNames) {
+    for (const idColumn of idColumns) {
+      for (const nameColumn of nameColumns) {
+        const { data, error } = await supabase
+          .from(tableName)
+          .select(`${idColumn}, ${nameColumn}`)
+          .eq(nameColumn, situationName)
+          .maybeSingle();
+
+        if (!error && data && typeof data === 'object' && idColumn in data) {
+          const value = (data as Record<string, any>)[idColumn];
+          if (typeof value === 'number') return value;
+          const parsed = Number(value);
+          if (Number.isFinite(parsed)) return parsed;
+        }
+      }
+    }
+  }
+
+  return null;
+}
+
+// Map mobile situation options to Supabase situation_type_id
+// Matches v_situation_types table exactly
+const SITUATION_TYPE_MAP: Record<string, number> = {
+  'Trapped in building': 1,
+  'Flood rising rapidly': 2,
+  'Medical emergency': 3,
+  'Stranded on rooftop': 4,
+  'Vehicle submerged': 5,
+  'Other emergency': 6,
+};
+
+function mapSituationToTypeId(situation: string | null): number | null {
+  if (!situation) return null;
+  return SITUATION_TYPE_MAP[situation] ?? 6; // default to 'Other emergency'
+}
+
+async function updateSosAlert(
+  remoteRefOrId: { table: string; idColumn: string; id: string | number } | string | null,
+  selectedPeople: string | null,
+  selectedSituation: string | null,
+) {
+  const peopleCount = peopleToNumber(selectedPeople);
+  const situationTypeId = mapSituationToTypeId(selectedSituation);
+
+  const payload: Record<string, any> = {};
+  if (peopleCount !== null) payload.number_of_people = peopleCount;
+  if (situationTypeId !== null) payload.situation_type_id = situationTypeId;
+
+  if (Object.keys(payload).length === 0) return;
+
+  // Determine the sos_id to update
+  let sosId: string | number | null = null;
+
+  if (remoteRefOrId && typeof remoteRefOrId === 'object' && 'id' in remoteRefOrId) {
+    sosId = remoteRefOrId.id;
+  } else if (typeof remoteRefOrId === 'string') {
+    sosId = remoteRefOrId;
+  }
+
+  if (!sosId) {
+    throw new Error('No remote reference or ID provided for update.');
+  }
+
+  const { data, error } = await supabase
+    .from('sos_alerts')
+    .update(payload)
+    .eq('sos_id', sosId)
+    .select('sos_id, number_of_people, situation_type_id');
+
+  console.log('[updateSosAlert] result:', { sosId, payload, data, error: error?.message });
+
+  if (error) {
+    throw new Error(error.message);
+  }
+}
+
 export default function SOSScreen() {
-  const { addAlert, logActivity } = useApp();
+  const { addAlert, updateAlert, updateAlertFields, logActivity, alerts, user } = useApp();
   const [showDetails, setShowDetails]               = useState(false);
   const [selectedPeople, setSelectedPeople]         = useState<string | null>(null);
   const [selectedSituation, setSelectedSituation]   = useState<string | null>(null);
@@ -30,82 +364,220 @@ export default function SOSScreen() {
   const [showConfirmModal, setShowConfirmModal]           = useState(false);
   const [updateSent,       setUpdateSent]                 = useState(false);
 
-  // ── One-time SOS lock ──────────────────────────────────────────────────
-  const [sosPressed, setSosPressed]   = useState(false); // true = already sent
+  const [sosPressed, setSosPressed]     = useState(false);
+  const [firestoreId, setFirestoreId]   = useState<string | null>(null);
+  const [remoteAlertRef, setRemoteAlertRef] = useState<{ table: string; idColumn: string; id: string | number } | null>(null);
+  const [activeSosUserEmail, setActiveSosUserEmail] = useState<string | null>(null);
   const scaleAnim = useRef(new Animated.Value(1)).current;
-  // ───────────────────────────────────────────────────────────────────────
+  const retryCounts = useRef<Record<string, number>>({});
 
-  const handleSOSPress = () => {
-    // Block repeat presses
+  // Reset local SOS UI state when user logs out so tests can be repeated.
+  useEffect(() => {
+    if (!user || !user.email) {
+      setSosPressed(false);
+      setFirestoreId(null);
+      setRemoteAlertRef(null);
+      setActiveSosUserEmail(null);
+      setShowDetails(false);
+      setUpdateSent(false);
+    }
+  }, [user && user.email]);
+
+  // Unlock SOS button when all alerts are resolved (rescued)
+  useEffect(() => {
+    if (sosPressed && alerts.length > 0) {
+      const allResolved = alerts.every(a => a.status === 'rescued');
+      if (allResolved) {
+        setSosPressed(false);
+        setUpdateSent(false);
+      }
+    }
+  }, [alerts, sosPressed]);
+
+  const scheduleRetryInsert = (localId: string, authUserId: string, attempt = 1) => {
+    const maxAttempts = 5;
+    const delay = 10000 * attempt; // exponential-ish backoff: 10s,20s,...
+    retryCounts.current[localId] = attempt;
+    setTimeout(async () => {
+      try {
+        const remote = await insertSosAlert({ authUserId });
+        const remoteId = remote.id ? String(remote.id) : null;
+        if (remoteId) {
+          updateAlertFields(localId, { firestoreId: remoteId, status: 'sent' });
+          setRemoteAlertRef(remote.id ? remote : null);
+          logActivity({ type: 'sos_sent', title: 'SOS Sent', description: 'Emergency request synced after retry' });
+          delete retryCounts.current[localId];
+          return;
+        }
+      } catch (err) {
+        console.error('Retry insert failed for', localId, err);
+        updateAlertFields(localId, { lastError: readableSupabaseError(err) });
+      }
+
+      const nextAttempt = (retryCounts.current[localId] || 0) + 1;
+      if (nextAttempt <= maxAttempts) {
+        scheduleRetryInsert(localId, authUserId, nextAttempt);
+      } else {
+        updateAlertFields(localId, { status: 'pending' });
+        logActivity({ type: 'alert_edited', title: 'SOS Failed', description: 'Failed to sync SOS after retries' });
+      }
+    }, delay);
+  };
+  const hasActiveSosAlert = alerts.some((alert) =>
+    alert.status === 'sent' ||
+    alert.status === 'pending' ||
+    alert.status === 'dispatched',
+  );
+  const isSosActive = sosPressed || (activeSosUserEmail === user.email && hasActiveSosAlert);
+
+  const handleSOSPress = async () => {
     if (sosPressed) return;
 
-    // Pulse animation
+    // Limit: max 5 active (unresolved) SOS alerts per user
+    const activeAlertCount = alerts.filter(a => a.status === 'sent' || a.status === 'pending' || a.status === 'dispatched').length;
+    if (activeAlertCount >= 5) {
+      Alert.alert(
+        'SOS Limit Reached',
+        'You have 5 active SOS alerts. Please wait for your current alerts to be resolved before sending another.',
+        [{ text: 'OK' }],
+      );
+      return;
+    }
+
     Animated.sequence([
       Animated.timing(scaleAnim, { toValue: 0.92, duration: 100, useNativeDriver: true }),
       Animated.timing(scaleAnim, { toValue: 1,    duration: 100, useNativeDriver: true }),
     ]).start();
 
-    // Lock the button immediately
     setSosPressed(true);
     setShowDetails(true);
 
-    const id = Date.now().toString();
-    addAlert({
-      id,
-      time: new Date().toLocaleString(),
-      timeAgo: 'Just now',
-      people: selectedPeople,
-      situation: selectedSituation,
-      location: 'Detected',
-      status: 'sent',
-    });
-    logActivity({
-      type: 'sos_sent',
-      title: 'SOS Sent',
-      description: 'Emergency rescue request sent to rescue teams',
-    });
+    let localAlertId = `alert_${Date.now()}`;
+    try {
+      // Get user's current location
+      let latitude = 0;
+      let longitude = 0;
+      try {
+        const { status } = await Location.requestForegroundPermissionsAsync();
+        if (status === 'granted') {
+          const loc = await Location.getCurrentPositionAsync({
+            accuracy: Location.Accuracy.High,
+          });
+          latitude = loc.coords.latitude;
+          longitude = loc.coords.longitude;
+          console.log('[SOS] Got location:', latitude, longitude);
+        } else {
+          console.warn('[SOS] Location permission not granted, sending without coordinates');
+        }
+      } catch (locErr) {
+        console.warn('[SOS] Could not get location:', locErr);
+      }
 
-    Alert.alert(
-      '🚨 SOS Sent',
-      'Your location has been sent to rescue teams. Please also call the emergency hotlines below.',
-      [{ text: 'OK' }],
-    );
+      const { data: authData } = await supabase.auth.getUser();
+      const authUserId = authData.user?.id;
+      const authEmail = authData.user?.email;
+      if (!authUserId) {
+        throw new Error('No authenticated user found for SOS alert.');
+      }
+
+      await ensureUserProfileForSos({ authUserId, authEmail, user });
+      setActiveSosUserEmail(authEmail || user.email || null);
+
+      // Optimistic: add local alert first so UI locks immediately and it appears in My Alerts.
+      localAlertId = `alert_${Date.now()}`;
+      addAlert({
+        id:          localAlertId,
+        firestoreId: localAlertId,
+        time:        new Date().toLocaleString(),
+        timeAgo:     'Just now',
+        people:      null,
+        situation:   null,
+        location:    user.barangay || 'Detected',
+        status:      'pending',
+        timestamp:   Date.now(),
+      });
+
+      // Attempt to persist to Supabase; if it fails we'll mark pending and schedule retries.
+      try {
+        const remote = await insertSosAlert({ authUserId, latitude, longitude });
+        const remoteId = remote.id ? String(remote.id) : null;
+        if (remoteId) {
+          setFirestoreId(remoteId);
+          setRemoteAlertRef(remote.id ? remote : null);
+          if (updateAlertFields) updateAlertFields(localAlertId, { firestoreId: remoteId, status: 'sent', lastError: null });
+        }
+      } catch (err) {
+        console.error('Initial insert failed, scheduling retries:', err);
+        if (updateAlertFields) updateAlertFields(localAlertId, { status: 'pending', lastError: readableSupabaseError(err) });
+        scheduleRetryInsert(localAlertId, authUserId, 1);
+      }
+
+      logActivity({
+        type:        'sos_sent',
+        title:       'SOS Sent',
+        description: `Emergency rescue request sent${latitude ? ` from ${latitude.toFixed(4)}, ${longitude.toFixed(4)}` : ''}`,
+      });
+
+      Alert.alert(
+        '🚨 SOS Sent',
+        'Your location has been sent to rescue teams. Please also call the emergency hotlines below.',
+        [{ text: 'OK' }],
+      );
+    } catch (err) {
+      console.error('Failed to save SOS:', err);
+      setSosPressed(false);
+      Alert.alert('SOS Failed', `Could not send alert: ${readableSupabaseError(err)}`);
+    }
+
   };
 
-  // Update alert details — shows confirmation modal first
   const handleSendDetailed = () => {
     setShowConfirmModal(true);
   };
 
-  const handleConfirmUpdate = () => {
+  const handleConfirmUpdate = async () => {
     setShowConfirmModal(false);
-    const id = Date.now().toString();
-    addAlert({
-      id,
-      time: new Date().toLocaleString(),
-      timeAgo: 'Just now',
-      people: selectedPeople,
-      situation: selectedSituation,
-      location: 'Detected',
-      status: 'sent',
-    });
+
+    try {
+      const targetId = firestoreId || alerts?.[0]?.firestoreId || alerts?.[0]?.id;
+
+      // Try to update remote alert. First try with full remoteRef if available, otherwise use firestoreId alone
+      try {
+        if (remoteAlertRef) {
+          await updateSosAlert(remoteAlertRef, selectedPeople, selectedSituation);
+        } else if (targetId) {
+          await updateSosAlert(targetId, selectedPeople, selectedSituation);
+        }
+      } catch (updateErr) {
+        console.error('Failed to update remote SOS details:', updateErr);
+        // Continue to update locally even if remote update fails
+      }
+
+      // Always update local alert
+      if (targetId) {
+        updateAlert(targetId, selectedPeople || '', selectedSituation || '');
+      } else {
+        console.warn('No alert id found - cannot update');
+      }
+    } catch (err) {
+      console.error('Failed to update SOS details:', err);
+    }
+
     logActivity({
-      type: 'alert_created',
-      title: 'Alert Updated',
-      description: `Updated SOS details: ${selectedPeople} people${selectedSituation ? ` — ${selectedSituation}` : ''}`,
+      type:        'alert_created',
+      title:       'Alert Updated',
+      description: `Updated SOS: ${selectedPeople} people${selectedSituation ? ` — ${selectedSituation}` : ''}`,
     });
-    // Reset details after sending so resident can submit fresh update
+
     setSelectedPeople(null);
     setSelectedSituation(null);
     setShowDetails(false);
-    // Show "Details Updated" badge — stays until next update is sent
     setUpdateSent(true);
   };
 
   return (
     <ScrollView style={s.container} contentContainerStyle={s.scroll} showsVerticalScrollIndicator={false}>
 
-      {/* Header Banner */}
       <View style={s.banner}>
         <View style={s.bannerIcon}>
           <Ionicons name="shield-checkmark-outline" size={24} color="#ffffff" />
@@ -116,39 +588,161 @@ export default function SOSScreen() {
         </View>
       </View>
 
-      {/* SOS Button Card */}
       <View style={s.sosCard}>
 
-        {/* Rectangle SOS Button */}
         <Animated.View style={{ transform: [{ scale: scaleAnim }], width: '100%' }}>
           <TouchableOpacity
-            style={[s.sosButton, sosPressed && s.sosButtonSent]}
+            style={[s.sosButton, isSosActive && s.sosButtonSent]}
             onPress={handleSOSPress}
-            activeOpacity={sosPressed ? 1 : 0.85}
-            disabled={sosPressed}
+            activeOpacity={isSosActive ? 1 : 0.85}
+            disabled={isSosActive}
           >
             <Ionicons
-              name={sosPressed ? 'checkmark-circle-outline' : 'alert-circle-outline'}
+              name={isSosActive ? 'checkmark-circle-outline' : 'alert-circle-outline'}
               size={22}
-              color={sosPressed ? '#16a34a' : '#ffffff'}
+              color={isSosActive ? '#16a34a' : '#ffffff'}
             />
-            <Text style={[s.sosButtonText, sosPressed && s.sosButtonTextSent]}>
-              {sosPressed ? 'SOS Sent' : 'Send Emergency Alert'}
+            <Text style={[s.sosButtonText, isSosActive && s.sosButtonTextSent]}>
+              {isSosActive ? 'SOS Sent' : 'Send Emergency Alert'}
             </Text>
           </TouchableOpacity>
         </Animated.View>
 
-        {/* Status label under button — hidden since card shows status */}
-
-        {/* One-time lock notice */}
-        {sosPressed && (
+        {isSosActive && (
           <View style={s.lockNotice}>
             <Ionicons name="lock-closed-outline" size={14} color="#6b7280" />
             <Text style={s.lockText}>Button locked to prevent duplicate alerts. You can still update your details below.</Text>
           </View>
         )}
 
-        {/* Update sent confirmation badge */}
+        {/* SOS Status Tracker */}
+        {isSosActive && (() => {
+          const latestAlert = alerts.find(a => a.status === 'dispatched' || a.status === 'rescued' || a.status === 'sent' || a.status === 'pending');
+          if (!latestAlert) return null;
+
+          const isDispatched = latestAlert.status === 'dispatched';
+          const isRescued = latestAlert.status === 'rescued';
+
+          return (
+            <View style={s.statusTracker}>
+              <Text style={s.statusTrackerTitle}>Rescue Status</Text>
+
+              {/* Step indicators */}
+              <View style={s.statusSteps}>
+                {/* Step 1: Sent */}
+                <View style={s.statusStep}>
+                  <View style={[s.statusStepCircle, { backgroundColor: '#2563eb' }]}>
+                    <Ionicons name="checkmark" size={14} color="#fff" />
+                  </View>
+                  <Text style={[s.statusStepLabel, { color: '#2563eb', fontWeight: '700' }]}>Sent</Text>
+                </View>
+
+                <View style={[s.statusStepLine, { backgroundColor: isDispatched || isRescued ? '#f59e0b' : '#e5e7eb' }]} />
+
+                {/* Step 2: Dispatched */}
+                <View style={s.statusStep}>
+                  <View style={[s.statusStepCircle, {
+                    backgroundColor: isDispatched || isRescued ? '#f59e0b' : '#e5e7eb',
+                  }]}>
+                    {isDispatched || isRescued
+                      ? <Ionicons name="checkmark" size={14} color="#fff" />
+                      : <Text style={{ fontSize: 10, color: '#9ca3af', fontWeight: '700' }}>2</Text>
+                    }
+                  </View>
+                  <Text style={[s.statusStepLabel, {
+                    color: isDispatched || isRescued ? '#f59e0b' : '#9ca3af',
+                    fontWeight: isDispatched ? '700' : '500',
+                  }]}>Dispatched</Text>
+                </View>
+
+                <View style={[s.statusStepLine, { backgroundColor: isRescued ? '#16a34a' : '#e5e7eb' }]} />
+
+                {/* Step 3: Rescued */}
+                <View style={s.statusStep}>
+                  <View style={[s.statusStepCircle, {
+                    backgroundColor: isRescued ? '#16a34a' : '#e5e7eb',
+                  }]}>
+                    {isRescued
+                      ? <Ionicons name="checkmark" size={14} color="#fff" />
+                      : <Text style={{ fontSize: 10, color: '#9ca3af', fontWeight: '700' }}>3</Text>
+                    }
+                  </View>
+                  <Text style={[s.statusStepLabel, {
+                    color: isRescued ? '#16a34a' : '#9ca3af',
+                    fontWeight: isRescued ? '700' : '500',
+                  }]}>Rescued</Text>
+                </View>
+              </View>
+
+              {/* Status message */}
+              {isDispatched && (
+                <View style={s.statusMessage}>
+                  <View style={[s.statusMessageIcon, { backgroundColor: '#fffbeb' }]}>
+                    <Ionicons name="car-outline" size={20} color="#f59e0b" />
+                  </View>
+                  <View style={{ flex: 1 }}>
+                    <Text style={[s.statusMessageTitle, { color: '#92400e' }]}>Rescue Team Dispatched</Text>
+                    <Text style={s.statusMessageBody}>A rescue team is on the way to your location. Stay where you are and keep your phone accessible.</Text>
+                  </View>
+                </View>
+              )}
+
+              {isRescued && (
+                <View style={s.statusMessage}>
+                  <View style={[s.statusMessageIcon, { backgroundColor: '#dcfce7' }]}>
+                    <Ionicons name="shield-checkmark" size={20} color="#16a34a" />
+                  </View>
+                  <View style={{ flex: 1 }}>
+                    <Text style={[s.statusMessageTitle, { color: '#166534' }]}>You Have Been Rescued</Text>
+                    <Text style={s.statusMessageBody}>Your rescue has been confirmed. Follow the rescue team's instructions for your safety.</Text>
+                  </View>
+                </View>
+              )}
+
+              {!isDispatched && !isRescued && (
+                <View style={s.statusMessage}>
+                  <View style={[s.statusMessageIcon, { backgroundColor: '#eff6ff' }]}>
+                    <Ionicons name="time-outline" size={20} color="#2563eb" />
+                  </View>
+                  <View style={{ flex: 1 }}>
+                    <Text style={[s.statusMessageTitle, { color: '#1e40af' }]}>Waiting for Response</Text>
+                    <Text style={s.statusMessageBody}>Your SOS has been received. Rescue teams are being notified. Please stay calm.</Text>
+                  </View>
+                </View>
+              )}
+            </View>
+          );
+        })()}
+
+        {/* Resend SOS Button */}
+        {isSosActive && (() => {
+          const activeCount = alerts.filter(a => a.status === 'sent' || a.status === 'pending' || a.status === 'dispatched').length;
+          if (activeCount >= 5) return (
+            <View style={s.resendLimitBox}>
+              <Ionicons name="alert-circle-outline" size={14} color="#6b7280" />
+              <Text style={s.resendLimitText}>SOS limit reached (5/5). Wait for alerts to be resolved.</Text>
+            </View>
+          );
+          return (
+            <TouchableOpacity
+              style={s.resendBtn}
+              onPress={() => {
+                setSosPressed(false);
+                setFirestoreId(null);
+                setRemoteAlertRef(null);
+                setShowDetails(false);
+                setUpdateSent(false);
+                // Trigger SOS press again after state resets
+                setTimeout(() => handleSOSPress(), 100);
+              }}
+              activeOpacity={0.7}
+            >
+              <Ionicons name="refresh-outline" size={18} color="#dc2626" />
+              <Text style={s.resendBtnText}>Resend SOS ({activeCount}/5)</Text>
+            </TouchableOpacity>
+          );
+        })()}
+
         {updateSent && (
           <View style={s.updateSentBadge}>
             <Ionicons name="checkmark-circle" size={16} color="#16a34a" />
@@ -156,7 +750,6 @@ export default function SOSScreen() {
           </View>
         )}
 
-        {/* Details Toggle — always available */}
         <TouchableOpacity
           style={s.detailsToggle}
           onPress={() => setShowDetails(v => !v)}
@@ -168,12 +761,10 @@ export default function SOSScreen() {
           <Ionicons name={showDetails ? 'chevron-up' : 'chevron-down'} size={18} color="#374151" />
         </TouchableOpacity>
 
-        {/* Expandable Details — always editable */}
         {showDetails && (
           <View style={s.detailsSection}>
             <View style={s.divider} />
 
-            {/* People Count */}
             <Text style={s.detailLabel}>
               How many people need rescue? <Text style={s.required}>*</Text>
             </Text>
@@ -197,7 +788,6 @@ export default function SOSScreen() {
               ))}
             </View>
 
-            {/* Situation Dropdown */}
             <Text style={[s.detailLabel, { marginTop: 16 }]}>Emergency Situation</Text>
             <TouchableOpacity
               style={s.dropdown}
@@ -226,7 +816,6 @@ export default function SOSScreen() {
 
             <Text style={s.detailHint}>Be specific: building type, floor level, landmarks nearby</Text>
 
-            {/* Update details button — only enabled when people AND situation are both selected */}
             {(() => {
               const canSend = !!selectedPeople && !!selectedSituation;
               return (
@@ -235,9 +824,9 @@ export default function SOSScreen() {
                   onPress={canSend ? handleSendDetailed : undefined}
                   activeOpacity={canSend ? 0.85 : 1}
                 >
-                  <Ionicons name={sosPressed ? 'refresh' : 'send'} size={16} color={canSend ? '#ffffff' : '#9ca3af'} />
+                  <Ionicons name={isSosActive ? 'refresh' : 'send'} size={16} color={canSend ? '#ffffff' : '#9ca3af'} />
                   <Text style={[s.sendBtnText, !canSend && s.sendBtnTextDisabled]}>
-                    {sosPressed ? 'UPDATE DETAILS' : 'SEND DETAILED REQUEST'}
+                    {isSosActive ? 'UPDATE DETAILS' : 'SEND DETAILED REQUEST'}
                   </Text>
                 </TouchableOpacity>
               );
@@ -246,7 +835,6 @@ export default function SOSScreen() {
         )}
       </View>
 
-      {/* Confirmation Modal */}
       <Modal
         visible={showConfirmModal}
         transparent
@@ -295,7 +883,6 @@ export default function SOSScreen() {
         </View>
       </Modal>
 
-      {/* Hotlines Card */}
       <View style={s.hotlineCard}>
         <Text style={s.hotlineTitle}>CALL THESE NUMBERS NOW:</Text>
         {HOTLINES.map((h, i) => (
@@ -327,7 +914,6 @@ const s = StyleSheet.create({
   container: { flex: 1, backgroundColor: '#dbeafe' },
   scroll: { padding: 14, gap: 14, paddingBottom: 32 },
 
-  // Banner
   banner: {
     backgroundColor: '#1d4ed8',
     borderRadius: 14,
@@ -345,7 +931,6 @@ const s = StyleSheet.create({
   bannerTitle: { fontSize: 15, fontWeight: '700', color: '#ffffff', letterSpacing: 0.1 },
   bannerSub: { fontSize: 12, color: 'rgba(255,255,255,0.82)', marginTop: 3, lineHeight: 17 },
 
-  // SOS Card
   sosCard: {
     backgroundColor: '#ffffff',
     borderRadius: 16,
@@ -358,7 +943,6 @@ const s = StyleSheet.create({
     elevation: 4,
   },
 
-  // Rectangle SOS Button
   sosButton: {
     width: '100%',
     backgroundColor: '#dc2626',
@@ -379,14 +963,7 @@ const s = StyleSheet.create({
   sosButtonText:     { fontSize: 16, fontWeight: '700', color: '#ffffff' },
   sosButtonTextSent: { color: '#16a34a' },
   sosInner: { flexDirection: 'row', alignItems: 'center', gap: 14 },
-
-  sosTapHint: {
-    fontSize: 13,
-    color: '#6b7280',
-    fontWeight: '500',
-    marginBottom: 4,
-  },
-
+  sosTapHint: { fontSize: 13, color: '#6b7280', fontWeight: '500', marginBottom: 4 },
   sosSentBadge: {
     flexDirection: 'row', alignItems: 'center', gap: 6,
     backgroundColor: '#f0fdf4', borderRadius: 20,
@@ -394,7 +971,6 @@ const s = StyleSheet.create({
   },
   sosSentText: { fontSize: 12, color: '#16a34a', fontWeight: '600' },
 
-  // Lock notice
   lockNotice: {
     flexDirection: 'row', alignItems: 'flex-start', gap: 7,
     backgroundColor: '#f9fafb', borderRadius: 10,
@@ -404,7 +980,47 @@ const s = StyleSheet.create({
   },
   lockText: { flex: 1, fontSize: 11.5, color: '#6b7280', lineHeight: 17 },
 
-  // Details toggle
+  statusTracker: {
+    width: '100%', backgroundColor: '#f9fafb', borderRadius: 14,
+    padding: 16, marginTop: 8, marginBottom: 4,
+    borderWidth: 1, borderColor: '#e5e7eb',
+  },
+  statusTrackerTitle: { fontSize: 13, fontWeight: '700', color: '#111827', marginBottom: 14 },
+  statusSteps: { flexDirection: 'row', alignItems: 'center', justifyContent: 'center', marginBottom: 16 },
+  statusStep: { alignItems: 'center', gap: 4 },
+  statusStepCircle: {
+    width: 28, height: 28, borderRadius: 14,
+    alignItems: 'center', justifyContent: 'center',
+  },
+  statusStepLabel: { fontSize: 10 },
+  statusStepLine: { width: 36, height: 3, borderRadius: 2, marginHorizontal: 6, marginBottom: 14 },
+  statusMessage: {
+    flexDirection: 'row', alignItems: 'flex-start', gap: 10,
+    backgroundColor: '#fff', borderRadius: 10, padding: 12,
+    borderWidth: 1, borderColor: '#f3f4f6',
+  },
+  statusMessageIcon: {
+    width: 36, height: 36, borderRadius: 10,
+    alignItems: 'center', justifyContent: 'center', flexShrink: 0,
+  },
+  statusMessageTitle: { fontSize: 13, fontWeight: '700', marginBottom: 3 },
+  statusMessageBody: { fontSize: 12, color: '#6b7280', lineHeight: 17 },
+
+  resendBtn: {
+    flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 8,
+    width: '100%', paddingVertical: 13, marginTop: 8, marginBottom: 4,
+    backgroundColor: '#fef2f2', borderRadius: 10,
+    borderWidth: 1.5, borderColor: '#fecaca',
+  },
+  resendBtnText: { fontSize: 14, fontWeight: '700', color: '#dc2626' },
+  resendLimitBox: {
+    flexDirection: 'row', alignItems: 'center', gap: 7,
+    width: '100%', paddingVertical: 10, paddingHorizontal: 12, marginTop: 8,
+    backgroundColor: '#f9fafb', borderRadius: 10,
+    borderWidth: 1, borderColor: '#e5e7eb',
+  },
+  resendLimitText: { flex: 1, fontSize: 11.5, color: '#6b7280', lineHeight: 17 },
+
   detailsToggle: {
     flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between',
     width: '100%', paddingVertical: 14, marginTop: 4,
@@ -412,7 +1028,6 @@ const s = StyleSheet.create({
   detailsToggleText: { fontSize: 14, fontWeight: '600', color: '#374151' },
   divider: { height: 1, backgroundColor: '#f3f4f6', width: '100%', marginBottom: 14 },
 
-  // Details section
   detailsSection: { width: '100%', gap: 0 },
   detailLabel: { fontSize: 14, fontWeight: '700', color: '#111827', marginBottom: 10 },
   required: { color: '#dc2626' },
@@ -453,7 +1068,6 @@ const s = StyleSheet.create({
   sendBtnText: { fontSize: 13, fontWeight: '700', color: '#ffffff', letterSpacing: 0.5 },
   sendBtnTextDisabled: { color: '#9ca3af' },
 
-  // Hotlines
   hotlineCard: {
     backgroundColor: '#ffffff',
     borderRadius: 16,
@@ -491,7 +1105,6 @@ const s = StyleSheet.create({
   },
   updateSentText: { fontSize: 13, color: '#16a34a', fontWeight: '600', flex: 1 },
 
-  // Confirmation Modal
   modalOverlay:    { flex: 1, backgroundColor: 'rgba(0,0,0,0.45)', justifyContent: 'center', alignItems: 'center', padding: 24 },
   modalCard:       { backgroundColor: '#ffffff', borderRadius: 20, padding: 24, width: '100%', alignItems: 'center' },
   modalIconWrap:   { width: 56, height: 56, borderRadius: 16, backgroundColor: '#eff6ff', alignItems: 'center', justifyContent: 'center', marginBottom: 14 },

@@ -9,9 +9,27 @@
     "userInterfaceStyle": "automatic",
     "newArchEnabled": true,
     "ios": {
-      "supportsTablet": true
+      "supportsTablet": true,
+      "bundleIdentifier": "com.hydroalert.mobile",
+      "config": {
+        "googleMapsApiKey": "AIzaSyALS3KMJOCB5sZkmQrJKJt-QvMGDYqLHVg"
+      },
+      "infoPlist": {
+        "NSLocationWhenInUseUsageDescription": "HydroAlert needs your location to send your position to rescue teams during SOS emergencies."
+      }
     },
     "android": {
+      "package": "com.hydroalert.mobile",
+      "googleServicesFile": "./google-services.json",
+      "config": {
+        "googleMaps": {
+          "apiKey": "AIzaSyALS3KMJOCB5sZkmQrJKJt-QvMGDYqLHVg"
+        }
+      },
+      "permissions": [
+        "ACCESS_FINE_LOCATION",
+        "ACCESS_COARSE_LOCATION"
+      ],
       "adaptiveIcon": {
         "backgroundColor": "#E6F4FE",
         "foregroundImage": "./assets/images/android-icon-foreground.png",
@@ -25,8 +43,23 @@
       "output": "static",
       "favicon": "./assets/images/favicon.png"
     },
+    "extra": {
+      "GEMINI_API_KEY": "AIzaSyAc-wT796h33MhoJaKTsm2Z2-GFiso_388",
+      "eas": {
+        "projectId": "hydroalert_mobile"
+      }
+    },
     "plugins": [
       "expo-router",
+      [
+        "expo-notifications",
+        {
+          "icon": "./assets/images/icon.png",
+          "color": "#2563eb",
+          "defaultChannel": "sos_alerts",
+          "sounds": []
+        }
+      ],
       [
         "expo-splash-screen",
         {

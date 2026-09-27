@@ -1,40 +1,58 @@
-import React, { useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import {
   View, Text, TextInput, TouchableOpacity,
   StyleSheet, SafeAreaView, StatusBar,
   KeyboardAvoidingView, Platform, ScrollView,
   Dimensions, ActivityIndicator,
 } from 'react-native';
-import { router } from 'expo-router';
+import { router, useLocalSearchParams } from 'expo-router';
+import * as Linking from 'expo-linking';
 import { Ionicons } from '@expo/vector-icons';
-import { signInWithEmailAndPassword, sendPasswordResetEmail } from 'firebase/auth';
-import { auth, db } from './firebase';
-import { doc, getDoc } from 'firebase/firestore';
-import { useApp } from './AppContext';
+import { supabase } from '../lib/supabase';
+import { useApp } from './app-context';
 
 const { width } = Dimensions.get('window');
 
-function firebaseErrorMessage(code: string): string {
-  switch (code) {
-    case 'auth/user-not-found':
-    case 'auth/invalid-credential':
-      return 'No account found with this email. Please check and try again.';
-    case 'auth/wrong-password':
-      return 'Incorrect password. Please try again.';
-    case 'auth/invalid-email':
-      return 'Please enter a valid email address.';
-    case 'auth/user-disabled':
-      return 'This account has been disabled. Contact support.';
-    case 'auth/too-many-requests':
-      return 'Too many failed attempts. Please wait a moment and try again.';
-    case 'auth/network-request-failed':
-      return 'Network error. Please check your internet connection.';
-    default:
-      return 'Something went wrong. Please try again.';
+function supabaseErrorMessage(message: string): string {
+  if (message.includes('Invalid login credentials')) {
+    return 'No account found, incorrect password, or the account email is not confirmed yet.';
   }
+  if (message.includes('Email not confirmed')) {
+    return 'Please verify your email before signing in.';
+  }
+  if (message.includes('Too many requests')) {
+    return 'Too many failed attempts. Please wait a moment and try again.';
+  }
+  if (message.includes('Network')) {
+    return 'Network error. Please check your internet connection.';
+  }
+  return 'Something went wrong. Please try again.';
+}
+
+async function lookupNamedId(
+  tableNames: string[],
+  idColumn: string,
+  nameColumn: string,
+  nameValue: string,
+) {
+  for (const tableName of tableNames) {
+    const { data, error } = await supabase
+      .from(tableName)
+      .select(idColumn)
+      .eq(nameColumn, nameValue)
+      .maybeSingle();
+
+    if (!error && data && typeof data === 'object' && idColumn in data) {
+      return (data as Record<string, any>)[idColumn] ?? null;
+    }
+  }
+
+  return null;
 }
 
 export default function LoginScreen() {
+  const params = useLocalSearchParams();
+  const handledRecoveryRef = useRef(false);
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
   const [showPassword, setShowPassword] = useState(false);
@@ -42,6 +60,74 @@ export default function LoginScreen() {
   const [success, setSuccess] = useState('');
   const [loading, setLoading] = useState(false);
   const { setUser, logActivity } = useApp();
+
+  const resolveResetRedirect = () => {
+    const configured = process.env.EXPO_PUBLIC_PASSWORD_RESET_REDIRECT?.trim();
+    const isHttp = !!configured && /^https?:\/\//i.test(configured);
+    const isLocalhost = !!configured && /^https?:\/\/(localhost|127\.0\.0\.1)(:\d+)?/i.test(configured);
+    const isExp = !!configured && /^exp:\/\//i.test(configured);
+
+    if (Platform.OS === 'web' && typeof window !== 'undefined') {
+      if (configured && isHttp && !isLocalhost) {
+        return configured;
+      }
+      return `${window.location.origin}/reset-password`;
+    }
+
+    if (configured && (isExp || !isHttp || (isHttp && !isLocalhost))) {
+      return configured;
+    }
+
+    // In Expo Go/dev, createURL produces an exp:// link that the app can handle.
+    return Linking.createURL('/reset-password');
+  };
+
+  useEffect(() => {
+    if (handledRecoveryRef.current) return;
+
+    let type = typeof params.type === 'string' ? params.type : undefined;
+    let accessToken = typeof params.access_token === 'string' ? params.access_token : undefined;
+    let refreshToken = typeof params.refresh_token === 'string' ? params.refresh_token : undefined;
+
+    if (Platform.OS === 'web' && typeof window !== 'undefined') {
+      const hashParams = new URLSearchParams(window.location.hash.startsWith('#') ? window.location.hash.slice(1) : window.location.hash);
+      const searchParams = new URLSearchParams(window.location.search);
+
+      type = type || hashParams.get('type') || searchParams.get('type') || undefined;
+      accessToken = accessToken || hashParams.get('access_token') || searchParams.get('access_token') || undefined;
+      refreshToken = refreshToken || hashParams.get('refresh_token') || searchParams.get('refresh_token') || undefined;
+    }
+
+    if (type === 'recovery' && accessToken && refreshToken) {
+      handledRecoveryRef.current = true;
+      router.replace({
+        pathname: '/reset-password',
+        params: {
+          access_token: accessToken,
+          refresh_token: refreshToken,
+        },
+      });
+      return;
+    }
+
+    if (Platform.OS === 'web' && typeof window !== 'undefined') {
+      const hashParams = new URLSearchParams(window.location.hash.startsWith('#') ? window.location.hash.slice(1) : window.location.hash);
+      const searchParams = new URLSearchParams(window.location.search);
+      const errorCode = hashParams.get('error_code') || searchParams.get('error_code');
+      const errorDescription = hashParams.get('error_description') || searchParams.get('error_description');
+
+      if (errorCode === 'otp_expired') {
+        handledRecoveryRef.current = true;
+        setError('Reset link expired or already used. Request a new password reset email and open it immediately.');
+        return;
+      }
+
+      if (errorDescription) {
+        handledRecoveryRef.current = true;
+        setError(decodeURIComponent(errorDescription.replace(/\+/g, ' ')));
+      }
+    }
+  }, [params.access_token, params.refresh_token, params.type]);
 
   const handleLogin = async () => {
     setError('');
@@ -51,39 +137,66 @@ export default function LoginScreen() {
     }
     setLoading(true);
     try {
-      const userCredential = await signInWithEmailAndPassword(auth, email.trim(), password);
-      const uid = userCredential.user.uid;
+      const { data: authData, error: authError } = await supabase.auth.signInWithPassword({
+        email: email.trim(),
+        password,
+      });
 
-      // Fetch user profile from Firestore
-      const userDocRef = doc(db, 'users', uid);
-      const userDocSnap = await getDoc(userDocRef);
+      if (authError) {
+        setError(supabaseErrorMessage(authError.message));
+        return;
+      }
 
-      if (userDocSnap.exists()) {
-        const userData = userDocSnap.data();
-        // Update AppContext with user data from Firestore
+      const userId = authData.user?.id;
+      const meta = authData.user?.user_metadata || {};
+
+      if (!userId) {
+        setError('Sign in succeeded, but no user profile was returned.');
+        return;
+      }
+
+      const { data: profile, error: profileError } = await supabase
+        .from('users')
+        .select('first_name, middle_name, last_name, phone_number, city, barangay, role_id, barangay_id, fcm_token')
+        .eq('user_id', userId)
+        .maybeSingle();
+
+      const profileBarangay = profile?.barangay || meta.barangay || '';
+      const profileCity = profile?.city || meta.city || '';
+      const resolvedBarangayId = profile?.barangay_id
+        ?? (profileBarangay ? await lookupNamedId(['v_barangays', 'barangays'], 'barangay_id', 'barangay_name', profileBarangay) : null);
+      const resolvedRoleId = profile?.role_id
+        ?? (meta.role || meta.role_name ? await lookupNamedId(['v_roles', 'roles'], 'role_id', 'role_name', String(meta.role || meta.role_name)) : null);
+
+      if (!profileError && profile) {
         setUser({
-          firstName: userData.firstName || '',
-          middleName: userData.middleName || '',
-          lastName: userData.lastName || '',
-          email: userData.email || email.trim(),
-          phone: userData.phone || '',
-          city: userData.city || '',
-          barangay: userData.barangay || '',
+          firstName: profile.first_name || '',
+          middleName: profile.middle_name || '',
+          lastName: profile.last_name || '',
+          email: authData.user?.email || email.trim(),
+          phone: profile.phone_number || '',
+          city: profileCity,
+          barangay: profileBarangay,
+          roleId: resolvedRoleId,
+          barangayId: resolvedBarangayId,
+          fcmToken: profile.fcm_token || meta.fcm_token || '',
         });
       } else {
-        // User doc doesn't exist yet, at least set the email
         setUser({
-          firstName: '',
-          middleName: '',
-          lastName: '',
-          email: email.trim(),
-          phone: '',
-          city: '',
-          barangay: '',
+          firstName: meta.first_name || '',
+          middleName: meta.middle_name || '',
+          lastName: meta.last_name || '',
+          email: authData.user?.email || email.trim(),
+          phone: meta.phone_number || '',
+          city: meta.city || '',
+          barangay: meta.barangay || '',
+          roleId: meta.role_id ? Number(meta.role_id) : null,
+          barangayId: meta.barangay_id ? Number(meta.barangay_id) : null,
+          fcmToken: meta.fcm_token || '',
         });
       }
 
-      // Log login activity to Firestore
+      // Log login activity
       logActivity({
         type: 'login',
         title: 'Logged In',
@@ -92,25 +205,43 @@ export default function LoginScreen() {
 
       router.replace('/(tabs)');
     } catch (err: any) {
-      setError(firebaseErrorMessage(err.code));
+      setError('Something went wrong. Please try again.');
     } finally {
       setLoading(false);
     }
   };
 
   const handleForgotPassword = async () => {
-    if (!email.trim()) {
-      setError('Please enter your email address first, then tap Forgot Password.');
-      return;
-    }
-    setLoading(true);
     setError('');
     setSuccess('');
+
+    const emailNormalized = email.trim().toLowerCase();
+    if (!emailNormalized) {
+      setError('Enter your email first, then tap Forgot Password.');
+      return;
+    }
+
+    const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+    if (!emailRegex.test(emailNormalized)) {
+      setError('Please enter a valid email address.');
+      return;
+    }
+
+    setLoading(true);
     try {
-      await sendPasswordResetEmail(auth, email.trim());
-      setSuccess(`Password reset link sent to ${email.trim()}. Check your inbox and spam folder.`);
-    } catch (err: any) {
-      setError(firebaseErrorMessage(err.code));
+      const redirectTo = resolveResetRedirect();
+      const { error: resetError } = await supabase.auth.resetPasswordForEmail(emailNormalized, {
+        redirectTo,
+      });
+
+      if (resetError) {
+        setError(supabaseErrorMessage(resetError.message));
+        return;
+      }
+
+      setSuccess('Password reset email sent. Please check your inbox and spam folder.');
+    } catch {
+      setError('Could not send password reset email. Please try again.');
     } finally {
       setLoading(false);
     }

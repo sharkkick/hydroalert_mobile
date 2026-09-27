@@ -7,12 +7,12 @@ import {
 } from 'react-native';
 import { router } from 'expo-router';
 import { Ionicons } from '@expo/vector-icons';
-import { useApp } from './AppContext';
+import { useApp } from './app-context';
+import { supabase } from '../lib/supabase';
 
 const { width } = Dimensions.get('window');
 
 const PEOPLE_OPTIONS = ['1', '2-5', '6-10', '10+'];
-
 const SITUATION_OPTIONS = [
   'Trapped in building',
   'Flood rising rapidly',
@@ -22,19 +22,124 @@ const SITUATION_OPTIONS = [
   'Other emergency',
 ];
 
-export default function MyAlertsScreen() {
-  const { alerts, updateAlert, logActivity, loadingAlerts } = useApp();
-  const [editingAlert, setEditingAlert]           = useState<string | null>(null);
-  const [editPeople, setEditPeople]               = useState('');
-  const [editSituation, setEditSituation]         = useState('');
-  const [editDescription, setEditDescription]     = useState('');
-  const [showSituationDrop, setShowSituationDrop] = useState(false);
+const STATUS_CONFIG = {
+  sent:       { label: 'PENDING',    color: '#ca8a04', border: '#fbbf24', bg: '#fffbeb', icon: 'time-outline'            },
+  pending:    { label: 'PENDING',    color: '#ca8a04', border: '#fbbf24', bg: '#fffbeb', icon: 'time-outline'            },
+  dispatched: { label: 'DISPATCHED', color: '#2563eb', border: '#93c5fd', bg: '#eff6ff', icon: 'car-outline'             },
+  rescued:    { label: 'RESCUED',    color: '#16a34a', border: '#86efac', bg: '#f0fdf4', icon: 'checkmark-circle-outline' },
+} as const;
 
-  const openEdit = (id: string, people: string | null, situation: string | null) => {
-    setEditingAlert(id);
+function peopleToNumber(value: string | null): number | null {
+  if (!value) return null;
+  if (value === '1') return 1;
+  if (value === '2-5') return 5;
+  if (value === '6-10') return 10;
+  if (value === '10+') return 10;
+  const parsed = Number(value);
+  return Number.isFinite(parsed) ? parsed : null;
+}
+
+async function lookupSituationTypeId(situationName: string): Promise<number | null> {
+  const tableNames = ['v_situation_types', 'situation_types'];
+  const idColumns = ['situation_type_id', 'id'];
+  const nameColumns = ['situation_type', 'situation_name', 'name', 'type_name'];
+
+  for (const tableName of tableNames) {
+    for (const idColumn of idColumns) {
+      for (const nameColumn of nameColumns) {
+        const { data, error } = await supabase
+          .from(tableName)
+          .select(`${idColumn}, ${nameColumn}`)
+          .eq(nameColumn, situationName)
+          .maybeSingle();
+
+        if (!error && data && typeof data === 'object' && idColumn in data) {
+          const value = (data as Record<string, any>)[idColumn];
+          if (typeof value === 'number') return value;
+          const parsed = Number(value);
+          if (Number.isFinite(parsed)) return parsed;
+        }
+      }
+    }
+  }
+
+  return null;
+}
+
+async function updateRemoteSosAlert(
+  remoteId: string,
+  people: string,
+  situation: string,
+) {
+  const peopleCount = peopleToNumber(people || null);
+
+  // Map mobile situation options to Supabase situation_type_id
+  // Matches v_situation_types table exactly
+  const SITUATION_TYPE_MAP: Record<string, number> = {
+    'Trapped in building': 1,
+    'Flood rising rapidly': 2,
+    'Medical emergency': 3,
+    'Stranded on rooftop': 4,
+    'Vehicle submerged': 5,
+    'Other emergency': 6,
+  };
+
+  let situationTypeId: number | null = null;
+  if (situation) {
+    // Try exact match first, then check if the situation contains one of the keys
+    situationTypeId = SITUATION_TYPE_MAP[situation] ?? null;
+    if (!situationTypeId) {
+      for (const [key, id] of Object.entries(SITUATION_TYPE_MAP)) {
+        if (situation.includes(key)) { situationTypeId = id; break; }
+      }
+    }
+    if (!situationTypeId) situationTypeId = 6; // default to Other
+  }
+
+  // Build payload matching actual schema
+  const payload: Record<string, any> = {};
+  if (peopleCount !== null) payload.number_of_people = peopleCount;
+  if (situationTypeId !== null) payload.situation_type_id = situationTypeId;
+
+  if (Object.keys(payload).length === 0) {
+    return { table: 'sos_alerts', idColumn: 'sos_id', id: remoteId };
+  }
+
+  // The primary key column is sos_id
+  const { data, error } = await supabase
+    .from('sos_alerts')
+    .update(payload)
+    .eq('sos_id', remoteId)
+    .select('sos_id, number_of_people, situation_type_id');
+
+  console.log('[updateRemoteSosAlert] result:', { data, error: error?.message });
+
+  if (error) {
+    throw new Error(error.message);
+  }
+
+  return { table: 'sos_alerts', idColumn: 'sos_id', id: remoteId };
+}
+
+function readableSupabaseError(error: any): string {
+  if (!error) return 'Unknown error.';
+  const message = String(error.message || error.error_description || error.details || 'Unknown error.');
+  if (message.toLowerCase().includes('row-level security')) return 'Permission denied by Supabase RLS policy.';
+  return message;
+}
+
+export default function MyAlertsScreen() {
+  const { alerts, updateAlert, updateAlertFields, logActivity, loadingAlerts, refreshAlerts } = useApp();
+  const [editingAlert,       setEditingAlert]       = useState<string | null>(null);
+  const [editPeople,         setEditPeople]         = useState('');
+  const [editSituation,      setEditSituation]      = useState('');
+  const [editDescription,    setEditDescription]    = useState('');
+  const [showSituationDrop,  setShowSituationDrop]  = useState(false);
+  const [refreshing,         setRefreshing]         = useState(false);
+
+  const openEdit = (firestoreId: string, people: string | null, situation: string | null) => {
+    setEditingAlert(firestoreId);
     setEditPeople(people || '');
-    // If the stored situation matches a preset option, pre-select it;
-    // otherwise treat it as a free-text description
     if (situation && SITUATION_OPTIONS.includes(situation)) {
       setEditSituation(situation);
       setEditDescription('');
@@ -45,24 +150,56 @@ export default function MyAlertsScreen() {
     setShowSituationDrop(false);
   };
 
-  const handleSave = () => {
+  const handleSave = async () => {
     if (!editingAlert) return;
-    // Combine dropdown selection + optional description
     const combinedSituation = [editSituation, editDescription.trim()]
-      .filter(Boolean)
-      .join(' — ');
+      .filter(Boolean).join(' — ');
 
-    updateAlert(editingAlert, editPeople, combinedSituation || null);
+    // Find the actual alert to get the real firestoreId (Supabase remote ID)
+    const targetAlert = alerts.find(a => a.id === editingAlert || a.firestoreId === editingAlert);
+    const firestoreId = targetAlert?.firestoreId || '';
+    // Only use firestoreId if it's a real remote ID (not empty, not local)
+    const remoteId = (firestoreId && firestoreId.length > 0 && !firestoreId.startsWith('alert_'))
+      ? firestoreId
+      : null;
+
+    // Optimistic: update local state and close modal immediately
+    const alertKey = editingAlert;
+    updateAlert(alertKey, editPeople, combinedSituation || '');
     logActivity({
       type: 'alert_edited',
       title: 'Alert Edited',
       description: `Updated emergency alert — ${editPeople} people${combinedSituation ? `: ${combinedSituation}` : ''}`,
     });
     setEditingAlert(null);
-    if (Platform.OS === 'web') {
-      window.alert('Alert details updated.');
-    } else {
-      Alert.alert('Saved', 'Alert details updated.');
+
+    if (!remoteId) {
+      console.warn('[handleSave] No remote ID available, cannot sync to Supabase. firestoreId:', firestoreId);
+      if (updateAlertFields) updateAlertFields(alertKey, { lastError: 'Alert not yet synced to server', syncInfo: null });
+      return;
+    }
+
+    // Sync to Supabase in background (no waiting)
+    updateRemoteSosAlert(remoteId, editPeople, combinedSituation || editSituation || editDescription)
+      .then((res) => {
+        if (res && res.table) {
+          updateAlertFields(alertKey, { lastError: null, syncInfo: `${res.table}.${res.idColumn}:${res.id}` });
+        } else {
+          updateAlertFields(alertKey, { lastError: 'No matching remote row', syncInfo: null });
+        }
+      })
+      .catch((error) => {
+        console.error('[handleSave] Failed to sync edited alert to Supabase:', error);
+        updateAlertFields(alertKey, { lastError: readableSupabaseError(error), syncInfo: null });
+      });
+  };
+
+  const handleRefresh = async () => {
+    setRefreshing(true);
+    try {
+      await refreshAlerts();
+    } finally {
+      setRefreshing(false);
     }
   };
 
@@ -78,9 +215,23 @@ export default function MyAlertsScreen() {
       </View>
 
       <ScrollView showsVerticalScrollIndicator={false} contentContainerStyle={s.scroll}>
-        <Text style={s.sectionTitle}>Emergency Alerts</Text>
 
-        {/* Loading State */}
+        {/* Section title + Refresh button */}
+        <View style={s.sectionRow}>
+          <Text style={s.sectionTitle}>Emergency Alerts</Text>
+          <TouchableOpacity
+            style={s.refreshBtn}
+            onPress={handleRefresh}
+            disabled={refreshing}
+            activeOpacity={0.7}
+          >
+            {refreshing
+              ? <ActivityIndicator size="small" color="#2563eb" />
+              : <Ionicons name="sync" size={20} color="#2563eb" />
+            }
+          </TouchableOpacity>
+        </View>
+
         {loadingAlerts ? (
           <View style={s.loadingCard}>
             <ActivityIndicator size="large" color="#2563eb" />
@@ -93,57 +244,93 @@ export default function MyAlertsScreen() {
             <Text style={s.emptySub}>When you send an SOS, it will appear here.</Text>
           </View>
         ) : (
-          alerts.map(alert => (
-            <View key={alert.id} style={s.alertCard}>
-              <View style={s.alertTop}>
-                <View style={s.alertTitleRow}>
-                  <Text style={s.alertId}>Emergency Alert #{alert.id.slice(-8)}</Text>
-                  <View style={s.sentBadge}>
-                    <Ionicons name="time-outline" size={12} color="#ca8a04" />
-                    <Text style={s.sentText}>SENT</Text>
-                  </View>
-                </View>
-                <Text style={s.alertTime}>{alert.timeAgo}</Text>
-              </View>
+          alerts.map(alert => {
+            const statusKey = (alert.status in STATUS_CONFIG)
+              ? alert.status as keyof typeof STATUS_CONFIG
+              : 'pending';
+            const statusCfg = STATUS_CONFIG[statusKey];
+            const fid = alert.firestoreId || alert.id;
 
-              <View style={s.alertDetails}>
-                <View style={s.detailRow}>
-                  <Ionicons name="location" size={14} color="#2563eb" />
-                  <View>
-                    <Text style={s.detailLabel}>Location</Text>
-                    <Text style={s.detailValue}>{alert.location}</Text>
+            return (
+              <View key={alert.id} style={s.alertCard}>
+                {(statusKey === 'dispatched' || statusKey === 'rescued') && (
+                  <View style={[s.statusBanner, { backgroundColor: statusCfg.bg, borderColor: statusCfg.border }]}>
+                    <Ionicons name={statusCfg.icon as any} size={16} color={statusCfg.color} />
+                    <Text style={[s.statusBannerText, { color: statusCfg.color }]}>
+                      {statusKey === 'dispatched'
+                        ? 'Rescue team has been dispatched to your location!'
+                        : 'You have been successfully rescued!'}
+                    </Text>
                   </View>
+                )}
+
+                <View style={s.alertTop}>
+                  <View style={s.alertTitleRow}>
+                    <Text style={s.alertId}>Emergency Alert ALT-{alert.firestoreId && !alert.firestoreId.startsWith('alert_') ? alert.firestoreId : '...'}</Text>
+                    <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8 }}>
+                      {alert.syncInfo ? (
+                        <View style={s.syncBadge}>
+                          <Text style={s.syncBadgeText}>Synced</Text>
+                        </View>
+                      ) : alert.lastError ? (
+                        <View style={s.errBadge}>
+                          <Text style={s.errBadgeText}>Error</Text>
+                        </View>
+                      ) : null}
+                      <View style={[s.sentBadge, { borderColor: statusCfg.border, backgroundColor: statusCfg.bg }]}>
+                        <Ionicons name={statusCfg.icon as any} size={12} color={statusCfg.color} />
+                        <Text style={[s.sentText, { color: statusCfg.color }]}>{statusCfg.label}</Text>
+                      </View>
+                    </View>
+                  </View>
+                  <Text style={s.alertTime}>{alert.timeAgo}</Text>
                 </View>
-                {alert.people && (
+
+                <View style={s.alertDetails}>
                   <View style={s.detailRow}>
-                    <Ionicons name="people" size={14} color="#2563eb" />
+                    <Ionicons name="location" size={14} color="#2563eb" />
                     <View>
-                      <Text style={s.detailLabel}>People</Text>
-                      <Text style={s.detailValue}>{alert.people}</Text>
+                      <Text style={s.detailLabel}>Location</Text>
+                      <Text style={s.detailValue}>{alert.location}</Text>
                     </View>
                   </View>
-                )}
-                {alert.situation && (
-                  <View style={s.detailRow}>
-                    <Ionicons name="warning" size={14} color="#dc2626" />
-                    <View style={{ flex: 1 }}>
-                      <Text style={s.detailLabel}>Situation</Text>
-                      <Text style={s.detailValue}>{alert.situation}</Text>
+                  {alert.people && (
+                    <View style={s.detailRow}>
+                      <Ionicons name="people" size={14} color="#2563eb" />
+                      <View>
+                        <Text style={s.detailLabel}>People</Text>
+                        <Text style={s.detailValue}>{alert.people}</Text>
+                      </View>
                     </View>
-                  </View>
-                )}
-              </View>
+                  )}
+                  {alert.situation && (
+                    <View style={s.detailRow}>
+                      <Ionicons name="warning" size={14} color="#dc2626" />
+                      <View style={{ flex: 1 }}>
+                        <Text style={s.detailLabel}>Situation</Text>
+                        <Text style={s.detailValue}>{alert.situation}</Text>
+                      </View>
+                    </View>
+                  )}
+                </View>
 
-              <TouchableOpacity
-                style={s.editBtn}
-                onPress={() => openEdit(alert.id, alert.people, alert.situation)}
-                activeOpacity={0.85}
-              >
-                <Ionicons name="pencil" size={14} color="#ffffff" />
-                <Text style={s.editBtnText}>Edit Alert</Text>
-              </TouchableOpacity>
-            </View>
-          ))
+                {/* Action buttons row */}
+                <View style={s.actionRow}>
+                  {/* Edit button — hidden if rescued */}
+                  {statusKey !== 'rescued' && (
+                    <TouchableOpacity
+                      style={s.editBtn}
+                      onPress={() => openEdit(fid, alert.people, alert.situation)}
+                      activeOpacity={0.85}
+                    >
+                      <Ionicons name="pencil" size={14} color="#ffffff" />
+                      <Text style={s.editBtnText}>Edit Alert</Text>
+                    </TouchableOpacity>
+                  )}
+                </View>
+              </View>
+            );
+          })
         )}
       </ScrollView>
 
@@ -154,18 +341,12 @@ export default function MyAlertsScreen() {
         animationType="slide"
         onRequestClose={() => setEditingAlert(null)}
       >
-        {/* KeyboardAvoidingView keeps the sheet visible when keyboard opens */}
         <KeyboardAvoidingView
           style={{ flex: 1 }}
           behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
           keyboardVerticalOffset={0}
         >
-          <TouchableOpacity
-            style={s.modalOverlay}
-            activeOpacity={1}
-            onPress={() => setEditingAlert(null)}
-          >
-            {/* Stop press propagation so tapping inside sheet doesn't close it */}
+          <TouchableOpacity style={s.modalOverlay} activeOpacity={1} onPress={() => setEditingAlert(null)}>
             <TouchableOpacity activeOpacity={1} onPress={() => {}}>
               <ScrollView
                 style={s.modalSheet}
@@ -173,7 +354,6 @@ export default function MyAlertsScreen() {
                 keyboardShouldPersistTaps="handled"
                 showsVerticalScrollIndicator={false}
               >
-                {/* Sheet header */}
                 <View style={s.modalHeader}>
                   <Text style={s.modalTitle}>Edit Emergency Alert</Text>
                   <TouchableOpacity onPress={() => setEditingAlert(null)} style={s.modalClose}>
@@ -181,7 +361,6 @@ export default function MyAlertsScreen() {
                   </TouchableOpacity>
                 </View>
 
-                {/* ── People picker ── */}
                 <Text style={s.modalLabel}>Number of People</Text>
                 <View style={s.peoplePicker}>
                   {PEOPLE_OPTIONS.map(opt => (
@@ -191,33 +370,18 @@ export default function MyAlertsScreen() {
                       onPress={() => setEditPeople(opt)}
                       activeOpacity={0.7}
                     >
-                      <Ionicons
-                        name="people"
-                        size={20}
-                        color={editPeople === opt ? '#2563eb' : '#6b7280'}
-                      />
-                      <Text style={[s.peopleOptText, editPeople === opt && s.peopleOptTextSelected]}>
-                        {opt}
-                      </Text>
+                      <Ionicons name="people" size={20} color={editPeople === opt ? '#2563eb' : '#6b7280'} />
+                      <Text style={[s.peopleOptText, editPeople === opt && s.peopleOptTextSelected]}>{opt}</Text>
                     </TouchableOpacity>
                   ))}
                 </View>
 
-                {/* ── Situation dropdown ── */}
                 <Text style={[s.modalLabel, { marginTop: 18 }]}>Emergency Situation</Text>
-                <TouchableOpacity
-                  style={s.dropdown}
-                  onPress={() => setShowSituationDrop(v => !v)}
-                  activeOpacity={0.7}
-                >
+                <TouchableOpacity style={s.dropdown} onPress={() => setShowSituationDrop(v => !v)} activeOpacity={0.7}>
                   <Text style={editSituation ? s.dropdownValue : s.dropdownPlaceholder}>
                     {editSituation || 'Select situation…'}
                   </Text>
-                  <Ionicons
-                    name={showSituationDrop ? 'chevron-up' : 'chevron-down'}
-                    size={18}
-                    color="#6b7280"
-                  />
+                  <Ionicons name={showSituationDrop ? 'chevron-up' : 'chevron-down'} size={18} color="#6b7280" />
                 </TouchableOpacity>
 
                 {showSituationDrop && (
@@ -230,30 +394,18 @@ export default function MyAlertsScreen() {
                           i === SITUATION_OPTIONS.length - 1 && { borderBottomWidth: 0 },
                           editSituation === opt && s.dropdownItemSelected,
                         ]}
-                        onPress={() => {
-                          setEditSituation(opt);
-                          setShowSituationDrop(false);
-                        }}
+                        onPress={() => { setEditSituation(opt); setShowSituationDrop(false); }}
                         activeOpacity={0.7}
                       >
-                        <Text style={[
-                          s.dropdownItemText,
-                          editSituation === opt && s.dropdownItemTextSelected,
-                        ]}>
-                          {opt}
-                        </Text>
-                        {editSituation === opt && (
-                          <Ionicons name="checkmark" size={16} color="#2563eb" />
-                        )}
+                        <Text style={[s.dropdownItemText, editSituation === opt && s.dropdownItemTextSelected]}>{opt}</Text>
+                        {editSituation === opt && <Ionicons name="checkmark" size={16} color="#2563eb" />}
                       </TouchableOpacity>
                     ))}
                   </View>
                 )}
 
-                {/* ── Optional description ── */}
                 <Text style={[s.modalLabel, { marginTop: 18 }]}>
-                  Additional Description{' '}
-                  <Text style={s.optional}>(optional)</Text>
+                  Additional Description <Text style={s.optional}>(optional)</Text>
                 </Text>
                 <TextInput
                   style={s.descInput}
@@ -261,22 +413,13 @@ export default function MyAlertsScreen() {
                   onChangeText={setEditDescription}
                   placeholder="e.g. 3rd floor, near the elevator, landmark nearby…"
                   placeholderTextColor="#9ca3af"
-                  multiline
-                  numberOfLines={3}
-                  maxLength={200}
-                  textAlignVertical="top"
-                  returnKeyType="done"
-                  blurOnSubmit
+                  multiline numberOfLines={3} maxLength={200}
+                  textAlignVertical="top" returnKeyType="done" blurOnSubmit
                 />
                 <Text style={s.charCount}>{editDescription.length}/200</Text>
 
-                {/* ── Action buttons ── */}
                 <View style={s.modalBtns}>
-                  <TouchableOpacity
-                    style={s.cancelBtn}
-                    onPress={() => setEditingAlert(null)}
-                    activeOpacity={0.7}
-                  >
+                  <TouchableOpacity style={s.cancelBtn} onPress={() => setEditingAlert(null)} activeOpacity={0.7}>
                     <Text style={s.cancelBtnText}>Cancel</Text>
                   </TouchableOpacity>
                   <TouchableOpacity style={s.saveBtn} onPress={handleSave} activeOpacity={0.85}>
@@ -294,7 +437,6 @@ export default function MyAlertsScreen() {
 
 const s = StyleSheet.create({
   safe: { flex: 1, backgroundColor: '#dbeafe' },
-
   header: {
     backgroundColor: '#2563eb',
     flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between',
@@ -303,9 +445,15 @@ const s = StyleSheet.create({
     paddingBottom: 14,
   },
   headerTitle: { fontSize: 18, fontWeight: '700', color: '#ffffff' },
-
   scroll: { padding: 16, gap: 14, paddingBottom: 40 },
-  sectionTitle: { fontSize: 16, fontWeight: '700', color: '#111827', marginBottom: 4 },
+
+  sectionRow: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', marginBottom: 4 },
+  sectionTitle: { fontSize: 16, fontWeight: '700', color: '#111827' },
+  refreshBtn: {
+    width: 40, height: 40, borderRadius: 10,
+    backgroundColor: '#eff6ff', alignItems: 'center', justifyContent: 'center',
+    borderWidth: 1, borderColor: '#bfdbfe',
+  },
 
   loadingCard: {
     backgroundColor: '#ffffff', borderRadius: 16, padding: 40,
@@ -315,7 +463,6 @@ const s = StyleSheet.create({
   },
   loadingText: { fontSize: 14, color: '#6b7280', fontWeight: '500' },
 
-  // Empty state
   emptyCard: {
     backgroundColor: '#ffffff', borderRadius: 16, padding: 40,
     alignItems: 'center', gap: 10,
@@ -325,50 +472,64 @@ const s = StyleSheet.create({
   emptyTitle: { fontSize: 16, fontWeight: '700', color: '#374151' },
   emptySub:   { fontSize: 13, color: '#9ca3af', textAlign: 'center' },
 
-  // Alert card
   alertCard: {
     backgroundColor: '#ffffff', borderRadius: 16, padding: 16,
     shadowColor: '#000', shadowOffset: { width: 0, height: 2 },
     shadowOpacity: 0.06, shadowRadius: 8, elevation: 2, gap: 12,
   },
+  statusBanner: {
+    flexDirection: 'row', alignItems: 'center', gap: 8,
+    borderWidth: 1, borderRadius: 10, padding: 10,
+  },
+  statusBannerText: { fontSize: 13, fontWeight: '600', flex: 1 },
   alertTop: { gap: 2 },
   alertTitleRow: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' },
   alertId: { fontSize: 14, fontWeight: '700', color: '#111827' },
   sentBadge: {
     flexDirection: 'row', alignItems: 'center', gap: 4,
-    borderWidth: 1, borderColor: '#fbbf24', borderRadius: 20,
-    paddingHorizontal: 10, paddingVertical: 3,
+    borderWidth: 1, borderRadius: 20, paddingHorizontal: 10, paddingVertical: 3,
   },
-  sentText:  { fontSize: 10, fontWeight: '700', color: '#ca8a04' },
+  sentText:  { fontSize: 10, fontWeight: '700' },
   alertTime: { fontSize: 12, color: '#9ca3af' },
-
+  syncBadge: {
+    backgroundColor: '#d1fae5',
+    borderRadius: 8,
+    paddingHorizontal: 8,
+    paddingVertical: 4,
+    borderWidth: 1,
+    borderColor: '#86efac',
+  },
+  syncBadgeText: { fontSize: 11, color: '#16a34a', fontWeight: '700' },
+  errBadge: {
+    backgroundColor: '#fff1f2',
+    borderRadius: 8,
+    paddingHorizontal: 8,
+    paddingVertical: 4,
+    borderWidth: 1,
+    borderColor: '#fecaca',
+  },
+  errBadgeText: { fontSize: 11, color: '#dc2626', fontWeight: '700' },
   alertDetails: { gap: 8, backgroundColor: '#f9fafb', borderRadius: 10, padding: 12 },
   detailRow: { flexDirection: 'row', alignItems: 'flex-start', gap: 8 },
   detailLabel: { fontSize: 11, color: '#9ca3af', fontWeight: '500' },
   detailValue: { fontSize: 13, color: '#374151', fontWeight: '600' },
 
+  actionRow: { flexDirection: 'row', alignItems: 'center', gap: 10 },
   editBtn: {
-    backgroundColor: '#2563eb', borderRadius: 10,
+    flex: 1, backgroundColor: '#2563eb', borderRadius: 10,
     paddingVertical: 12, flexDirection: 'row',
     alignItems: 'center', justifyContent: 'center', gap: 7,
   },
   editBtnText: { color: '#ffffff', fontSize: 14, fontWeight: '600' },
 
-  // Modal
-  modalOverlay: {
-    flex: 1,
-    backgroundColor: 'rgba(0,0,0,0.45)',
-    justifyContent: 'flex-end',
-  },
+  modalOverlay: { flex: 1, backgroundColor: 'rgba(0,0,0,0.45)', justifyContent: 'flex-end' },
   modalSheet: {
     backgroundColor: '#f3f4f6',
     borderTopLeftRadius: 24, borderTopRightRadius: 24,
-    padding: 24,
-    maxHeight: '92%',          // never taller than 92% of screen
+    padding: 24, maxHeight: '92%',
   },
   modalHeader: {
-    flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between',
-    marginBottom: 20,
+    flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', marginBottom: 20,
   },
   modalTitle: { fontSize: 18, fontWeight: '700', color: '#111827' },
   modalClose: {
@@ -377,8 +538,6 @@ const s = StyleSheet.create({
   },
   modalLabel: { fontSize: 14, fontWeight: '600', color: '#374151', marginBottom: 8 },
   optional:   { fontSize: 13, fontWeight: '400', color: '#9ca3af' },
-
-  // People picker
   peoplePicker: { flexDirection: 'row', gap: 8 },
   peopleOpt: {
     flex: 1, borderWidth: 1.5, borderColor: '#e5e7eb', borderRadius: 10,
@@ -387,8 +546,6 @@ const s = StyleSheet.create({
   peopleOptSelected:     { borderColor: '#2563eb', backgroundColor: '#eff6ff' },
   peopleOptText:         { fontSize: 13, fontWeight: '600', color: '#6b7280' },
   peopleOptTextSelected: { color: '#2563eb' },
-
-  // Situation dropdown
   dropdown: {
     flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between',
     borderWidth: 1.5, borderColor: '#e5e7eb', borderRadius: 10,
@@ -396,7 +553,6 @@ const s = StyleSheet.create({
   },
   dropdownValue:       { fontSize: 14, color: '#111827' },
   dropdownPlaceholder: { fontSize: 14, color: '#9ca3af' },
-
   dropdownList: {
     borderWidth: 1, borderColor: '#e5e7eb', borderRadius: 10,
     backgroundColor: '#ffffff', marginTop: 4, overflow: 'hidden',
@@ -411,16 +567,12 @@ const s = StyleSheet.create({
   dropdownItemSelected:     { backgroundColor: '#eff6ff' },
   dropdownItemText:         { fontSize: 14, color: '#374151' },
   dropdownItemTextSelected: { color: '#2563eb', fontWeight: '600' },
-
-  // Description input
   descInput: {
     backgroundColor: '#ffffff', borderWidth: 1.5, borderColor: '#e5e7eb',
     borderRadius: 10, padding: 12, fontSize: 14, color: '#111827',
     minHeight: 90, textAlignVertical: 'top',
   },
   charCount: { fontSize: 11, color: '#9ca3af', textAlign: 'right', marginTop: 4 },
-
-  // Buttons
   modalBtns:   { flexDirection: 'row', gap: 12, marginTop: 20 },
   cancelBtn:   {
     flex: 1, backgroundColor: '#ffffff', borderRadius: 12,
