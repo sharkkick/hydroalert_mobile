@@ -5,21 +5,32 @@ const GEMINI_API_KEY =
   (Constants.expoConfig?.extra as any)?.GEMINI_API_KEY ||
   '';
 
-export async function getGeminiInsight({ sensor, history, type = 'water' }: { sensor: any; history: any[]; type?: 'water' | 'rainfall' }) {
+export async function getGeminiInsight({ sensor, history, rainHistory, type = 'water' }: { sensor: any; history: any[]; rainHistory?: { label: string; value: number }[]; type?: 'water' | 'rainfall' }) {
   // Safety: ensure sensor and history have safe defaults
   const safeSensor = sensor || { id: 'S-001', label: 'Unknown', water: 0, rainfall: 0, status: 'normal' };
   const safeHistory = Array.isArray(history) ? history.filter(h => h != null) : [];
+  const safeRainHistory = Array.isArray(rainHistory) ? rainHistory.filter(h => h != null) : [];
 
-  const waterSeries = safeHistory.map(h => `${h.label}: ${h.water ?? 0}mm`).join(', ') || 'No data';
-  const rainSeries = safeHistory.map(h => `${h.label}: ${h.rainfall ?? 0}mm/hr`).join(', ') || 'No data';
+  const waterSeries = safeHistory.map(h => `${h.label}: ${h.water ?? 0}cm`).join(', ') || 'No data';
+  // Prefer the real rainfall history from the weather API; fall back to per-point history
+  const rainSeries = safeRainHistory.length > 0
+    ? safeRainHistory.map(h => `${h.label}: ${h.value ?? 0}mm`).join(', ')
+    : (safeHistory.map(h => `${h.label}: ${h.rainfall ?? 0}mm/hr`).join(', ') || 'No data');
+
+  const rainTotal = safeRainHistory.reduce((a, h) => a + (h.value ?? 0), 0);
+  const rainPeak = safeRainHistory.length ? Math.max(...safeRainHistory.map(h => h.value ?? 0)) : 0;
 
   const prompt = type === 'water'
     ? `You are an emergency advisor for flood-prone residents in Cavite, Philippines. Analyze the WATER LEVEL data and give ACTIONABLE ADVICE.
 
+The water level is measured in centimeters relative to GROUND LEVEL (0 cm = ground). Negative values mean water is below ground; positive means above ground. Scale: -40cm SAFE, -20cm WATCH (rising), 0cm LOW (at ground), 40cm WARNING, 90cm RELOCATE, 150cm CRITICAL.
+
 Sensor id: ${safeSensor.id}
 Location: ${safeSensor.label}
-Current water level: ${safeSensor.water}mm
+Current water level: ${safeSensor.water}cm
 Recent water levels: ${waterSeries}
+Recent rainfall (weather API): ${rainSeries}
+Rainfall so far this period: total ~${Math.round(rainTotal * 10) / 10}mm, peak ${Math.round(rainPeak * 10) / 10}mm
 
 Give DIRECT, ACTIONABLE ADVICE to residents. Use simple language. Be specific. Format as:
 
@@ -42,7 +53,9 @@ Keep it short, urgent, and clear. No technical jargon. No markdown formatting. W
 Sensor id: ${safeSensor.id}
 Location: ${safeSensor.label}
 Current rainfall intensity: ${safeSensor.rainfall}mm/hr
-Recent rainfall: ${rainSeries}
+Recent rainfall history (from weather API): ${rainSeries}
+Rainfall so far this period: total ~${Math.round(rainTotal * 10) / 10}mm, peak ${Math.round(rainPeak * 10) / 10}mm
+Also, current sensed water level: ${safeSensor.water}cm relative to ground (0cm = ground level)
 
 Give DIRECT, ACTIONABLE ADVICE to residents. Use simple language. Be specific. Format as:
 
@@ -75,7 +88,7 @@ Keep it short, urgent, and clear. No technical jargon. No markdown formatting. W
   }
 
   // Fallback: generate local insight
-  return generateLocalInsight(type, safeSensor, safeHistory);
+  return generateLocalInsight(type, safeSensor, safeHistory, safeRainHistory);
 }
 
 async function callGeminiAPI(prompt: string): Promise<string | null> {
@@ -171,7 +184,7 @@ function cleanText(text: string): string {
     .trim();
 }
 
-function generateLocalInsight(type: string, safeSensor: any, safeHistory: any[]): string {
+function generateLocalInsight(type: string, safeSensor: any, safeHistory: any[], safeRainHistory: { label: string; value: number }[] = []): string {
   if (type === 'water') {
     const waterLevel = safeSensor.water ?? 0;
     const trend = safeHistory.length >= 2
@@ -184,23 +197,23 @@ function generateLocalInsight(type: string, safeSensor: any, safeHistory: any[])
     let prepare = '';
     let evacuate = '';
 
-    if (waterLevel < 30) {
-      situation = 'Water level is low and safe. No flood threat at this time.';
+    if (waterLevel < 0) {
+      situation = `Water level is below ground (${waterLevel}cm). Safe — no flood threat at this time.`;
       actions = '• Continue normal activities\n• Keep monitoring for updates\n• Make sure your go-bag is ready just in case';
       prepare = '• No urgent preparation needed\n• Good time to restock your emergency kit';
       evacuate = '• No need to evacuate\n• Stay aware of weather forecasts';
-    } else if (waterLevel < 50) {
-      situation = `Water level is rising (${waterLevel}mm). ${trend === 'rising' ? 'It is still going up.' : 'It appears stable for now.'}`;
+    } else if (waterLevel < 40) {
+      situation = `Water has reached ground level (${waterLevel}cm). ${trend === 'rising' ? 'It is still going up.' : 'It appears stable for now.'}`;
       actions = '• Stay alert and monitor updates frequently\n• Move valuables away from the ground floor\n• Charge your phone and power bank now\n• Know your evacuation route';
       prepare = '• Pack a go-bag: water, food, medicine, IDs, phone charger\n• Move important documents to a high shelf or waterproof bag\n• Secure outdoor items that could float away';
-      evacuate = '• Not yet — but be ready to leave quickly\n• If water keeps rising past 50mm, prepare to evacuate';
-    } else if (waterLevel < 75) {
-      situation = `⚠️ Water level is HIGH (${waterLevel}mm) and ${trend === 'rising' ? 'STILL RISING' : 'holding steady'}. Flooding in low areas is likely.`;
+      evacuate = '• Not yet — but be ready to leave quickly\n• If water rises past 40cm, prepare to evacuate';
+    } else if (waterLevel < 90) {
+      situation = `⚠️ Water level is HIGH (${waterLevel}cm above ground) and ${trend === 'rising' ? 'STILL RISING' : 'holding steady'}. Flooding in low areas is likely.`;
       actions = '• Move to the 2nd floor if you have one\n• Unplug appliances and turn off main electrical switch\n• Do NOT cross flooded roads or walkways\n• Keep your phone charged and accessible';
       prepare = '• Grab your go-bag NOW\n• Water, food for 3 days, medicine, flashlight, power bank\n• Put IDs and cash in a ziplock bag\n• Wear closed shoes, not slippers';
       evacuate = '• BE READY TO EVACUATE at any moment\n• If water reaches your door, LEAVE IMMEDIATELY\n• Head to your nearest evacuation center';
     } else {
-      situation = `🚨 DANGER! Water level is CRITICAL (${waterLevel}mm) and ${trend === 'rising' ? 'STILL RISING' : 'at dangerous levels'}. Severe flooding is happening or imminent.`;
+      situation = `🚨 DANGER! Water level is CRITICAL (${waterLevel}cm above ground) and ${trend === 'rising' ? 'STILL RISING' : 'at dangerous levels'}. Severe flooding is happening or imminent.`;
       actions = '• EVACUATE NOW if you haven\'t already\n• If trapped, go to the highest point and signal for help\n• Use the SOS button to alert rescue teams\n• Do NOT attempt to walk or drive through floodwater';
       prepare = '• Take your go-bag and LEAVE\n• Bring phone, medicine, water, and nothing else\n• Help elderly neighbors evacuate too';
       evacuate = '• YES — EVACUATE IMMEDIATELY\n• Go to your nearest evacuation center\n• If you can\'t leave, go to the rooftop and call for help';
@@ -209,11 +222,14 @@ function generateLocalInsight(type: string, safeSensor: any, safeHistory: any[])
     return `⚠️ SITUATION:\n${situation}\n\n🚨 WHAT YOU SHOULD DO NOW:\n${actions}\n\n🎒 WHAT TO PREPARE:\n${prepare}\n\n📍 EVACUATION ADVICE:\n${evacuate}`;
   }
 
-  // Rainfall
+  // Rainfall — prefer the real weather-API history for the trend
   const rainfall = safeSensor.rainfall ?? 0;
-  const trend = safeHistory.length >= 2
-    ? (safeHistory[safeHistory.length - 1]?.rainfall ?? 0) > (safeHistory[safeHistory.length - 2]?.rainfall ?? 0) ? 'increasing'
-    : (safeHistory[safeHistory.length - 1]?.rainfall ?? 0) < (safeHistory[safeHistory.length - 2]?.rainfall ?? 0) ? 'decreasing' : 'stable'
+  const rainSeriesVals = safeRainHistory.length >= 2
+    ? safeRainHistory.map(h => h.value ?? 0)
+    : safeHistory.map(h => h.rainfall ?? 0);
+  const trend = rainSeriesVals.length >= 2
+    ? rainSeriesVals[rainSeriesVals.length - 1] > rainSeriesVals[rainSeriesVals.length - 2] ? 'increasing'
+    : rainSeriesVals[rainSeriesVals.length - 1] < rainSeriesVals[rainSeriesVals.length - 2] ? 'decreasing' : 'stable'
     : 'unknown';
 
   let situation = '';

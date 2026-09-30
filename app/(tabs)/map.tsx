@@ -3,9 +3,17 @@ import { Ionicons } from '@expo/vector-icons';
 import { useState, useEffect, useRef } from 'react';
 import * as Location from 'expo-location';
 import { supabase } from '../../lib/supabase';
-import { MapView, Marker, Callout, PROVIDER_GOOGLE } from '../../components/MapViewNative';
+import { MapView, Marker, Callout, UrlTile, PROVIDER_DEFAULT } from '../../components/MapViewNative';
+import WebFloodMap from '../../components/WebFloodMap';
 
 const { width, height } = Dimensions.get('window');
+
+// OpenWeather key (used for the precipitation tile overlay).
+const OWM_KEY = process.env.EXPO_PUBLIC_OPENWEATHER_API_KEY ?? '';
+
+// Free tile sources (no Google Maps key required)
+const OSM_TILE_URL = 'https://tile.openstreetmap.org/{z}/{x}/{y}.png';
+const OWM_PRECIP_URL = `https://tile.openweathermap.org/map/precipitation_new/{z}/{x}/{y}.png?appid=${OWM_KEY}`;
 
 // Default center: Bacoor, Cavite
 const DEFAULT_REGION = {
@@ -23,6 +31,15 @@ interface SosMarker {
   userName: string;
   createdAt: string;
   barangay: string;
+}
+
+interface SensorMarker {
+  id: string;
+  latitude: number;
+  longitude: number;
+  name: string;
+  waterLevelCm: number | null;
+  updatedAt: string;
 }
 
 function getStatusLabel(statusId: number | string): string {
@@ -53,8 +70,16 @@ export default function MapScreen() {
   const mapRef = useRef<any>(null);
   const [userLocation, setUserLocation] = useState<{ latitude: number; longitude: number } | null>(null);
   const [sosMarkers, setSosMarkers] = useState<SosMarker[]>([]);
+  const [sensorMarkers, setSensorMarkers] = useState<SensorMarker[]>([]);
+  const [authUserId, setAuthUserId] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
+  const [showRain, setShowRain] = useState(true);
+
+  // Get the authenticated user's id so we only show their own SOS reports
+  useEffect(() => {
+    supabase.auth.getUser().then(({ data }) => setAuthUserId(data.user?.id ?? null));
+  }, []);
 
   // Get user location
   useEffect(() => {
@@ -76,52 +101,75 @@ export default function MapScreen() {
     })();
   }, []);
 
-  // Fetch SOS alerts from Supabase
+  // Fetch ONLY the current user's SOS reports from Supabase
   const fetchSosAlerts = async () => {
     try {
-      // Try sos_alerts table first
+      // Resolve the auth user id (may not be in state yet on first run)
+      let uid = authUserId;
+      if (!uid) {
+        const { data: authData } = await supabase.auth.getUser();
+        uid = authData.user?.id ?? null;
+        if (uid) setAuthUserId(uid);
+      }
+      if (!uid) {
+        // Not logged in — show no personal reports
+        setSosMarkers([]);
+        setLoading(false);
+        setRefreshing(false);
+        return;
+      }
+
+      // Real sos_alerts columns: sos_alert_id, gps_latitude, gps_longitude, sos_status_id, user_id
       const { data, error } = await supabase
         .from('sos_alerts')
-        .select('sos_id, latitude, longitude, status_id, user_id')
-        .not('latitude', 'eq', 0)
-        .not('longitude', 'eq', 0)
-        .order('sos_id', { ascending: false })
+        .select('sos_alert_id, gps_latitude, gps_longitude, sos_status_id, user_id, created_at')
+        .eq('user_id', uid)
+        .not('gps_latitude', 'is', null)
+        .not('gps_longitude', 'is', null)
+        .order('sos_alert_id', { ascending: false })
         .limit(50);
 
       if (error) {
         console.error('[Map] Error fetching SOS alerts:', error.message);
+        setLoading(false);
+        setRefreshing(false);
         return;
       }
 
       if (data && data.length > 0) {
-        // Fetch user names for the alerts
+        // Fetch user names for the alerts (users columns: first_name, last_name)
         const userIds = [...new Set(data.map((d: any) => d.user_id).filter(Boolean))];
         let userMap: Record<string, string> = {};
 
         if (userIds.length > 0) {
           const { data: users } = await supabase
             .from('users')
-            .select('user_id, full_name, barangay')
+            .select('user_id, first_name, last_name')
             .in('user_id', userIds);
 
           if (users) {
             users.forEach((u: any) => {
-              userMap[u.user_id] = u.full_name || 'Resident';
+              const name = `${u.first_name ?? ''} ${u.last_name ?? ''}`.trim();
+              userMap[u.user_id] = name || 'Resident';
             });
           }
         }
 
-        const markers: SosMarker[] = data.map((alert: any) => ({
-          id: String(alert.sos_id),
-          latitude: alert.latitude,
-          longitude: alert.longitude,
-          status: getStatusLabel(alert.status_id),
-          userName: userMap[alert.user_id] || 'Resident',
-          createdAt: '',
-          barangay: '',
-        }));
+        const markers: SosMarker[] = data
+          .filter((a: any) => a.gps_latitude != null && a.gps_longitude != null)
+          .map((alert: any) => ({
+            id: String(alert.sos_alert_id),
+            latitude: Number(alert.gps_latitude),
+            longitude: Number(alert.gps_longitude),
+            status: getStatusLabel(alert.sos_status_id),
+            userName: userMap[alert.user_id] || 'Resident',
+            createdAt: alert.created_at ? new Date(alert.created_at).toLocaleString() : '',
+            barangay: '',
+          }));
 
         setSosMarkers(markers);
+      } else {
+        setSosMarkers([]);
       }
     } catch (err) {
       console.error('[Map] Error:', err);
@@ -131,13 +179,69 @@ export default function MapScreen() {
     }
   };
 
+  // Fetch flood sensors (with their latest water-level reading) to plot on the map
+  const fetchSensors = async () => {
+    try {
+      const { data: sensors, error } = await supabase
+        .from('sensors')
+        .select('sensor_id, device_hardware_id, sensor_name, gps_latitude, gps_longitude, updated_at')
+        .not('gps_latitude', 'is', null)
+        .not('gps_longitude', 'is', null);
+
+      if (error) {
+        console.error('[Map] Error fetching sensors:', error.message);
+        return;
+      }
+      if (!sensors || sensors.length === 0) {
+        setSensorMarkers([]);
+        return;
+      }
+
+      // Latest reading per sensor for the water level
+      const levelMap: Record<number, number> = {};
+      const updatedMap: Record<number, string> = {};
+      await Promise.all(
+        sensors.map(async (sn: any) => {
+          const { data: reading } = await supabase
+            .from('sensor_readings')
+            .select('water_level_cm, recorded_at')
+            .eq('sensor_id', sn.sensor_id)
+            .order('recorded_at', { ascending: false })
+            .limit(1)
+            .maybeSingle();
+          if (reading) {
+            levelMap[sn.sensor_id] = Number((reading as any).water_level_cm);
+            updatedMap[sn.sensor_id] = (reading as any).recorded_at;
+          }
+        }),
+      );
+
+      const markers: SensorMarker[] = sensors.map((sn: any) => ({
+        id: `sensor_${sn.sensor_id}`,
+        latitude: Number(sn.gps_latitude),
+        longitude: Number(sn.gps_longitude),
+        name: sn.sensor_name || sn.device_hardware_id || `Sensor ${sn.sensor_id}`,
+        waterLevelCm: sn.sensor_id in levelMap ? levelMap[sn.sensor_id] : null,
+        updatedAt: updatedMap[sn.sensor_id] ? new Date(updatedMap[sn.sensor_id]).toLocaleString() : '',
+      }));
+
+      setSensorMarkers(markers);
+    } catch (err) {
+      console.error('[Map] Error fetching sensors:', err);
+    }
+  };
+
   useEffect(() => {
     fetchSosAlerts();
+    fetchSensors();
 
     // Auto-refresh every 15 seconds
-    const interval = setInterval(fetchSosAlerts, 15000);
+    const interval = setInterval(() => {
+      fetchSosAlerts();
+      fetchSensors();
+    }, 15000);
     return () => clearInterval(interval);
-  }, []);
+  }, [authUserId]);
 
   // Subscribe to realtime SOS updates
   useEffect(() => {
@@ -158,6 +262,7 @@ export default function MapScreen() {
   const handleRefresh = () => {
     setRefreshing(true);
     fetchSosAlerts();
+    fetchSensors();
   };
 
   const handleCenterOnUser = () => {
@@ -174,17 +279,27 @@ export default function MapScreen() {
 
   return (
     <View style={s.container}>
-      {/* Map — native only */}
+      {/* Map — native uses react-native-maps with OSM + OpenWeather tiles */}
       {MapView ? (
         <MapView
           ref={mapRef}
           style={s.map}
-          provider={Platform.OS === 'android' ? PROVIDER_GOOGLE : undefined}
+          provider={PROVIDER_DEFAULT}
+          mapType="none"
           initialRegion={userLocation ? { ...userLocation, latitudeDelta: 0.05, longitudeDelta: 0.05 } : DEFAULT_REGION}
           showsUserLocation
           showsMyLocationButton={false}
           showsCompass
         >
+          {/* OpenStreetMap base layer (free, no Google key) */}
+          {UrlTile && (
+            <UrlTile urlTemplate={OSM_TILE_URL} maximumZ={19} zIndex={-1} tileSize={256} />
+          )}
+          {/* OpenWeather precipitation overlay */}
+          {UrlTile && showRain && OWM_KEY ? (
+            <UrlTile urlTemplate={OWM_PRECIP_URL} maximumZ={19} zIndex={1} opacity={0.55} tileSize={256} />
+          ) : null}
+
           {/* SOS Alert Markers */}
           {sosMarkers.map(marker => (
             <Marker
@@ -207,28 +322,55 @@ export default function MapScreen() {
               </Callout>
             </Marker>
           ))}
+
+          {/* Flood Sensor Markers */}
+          {sensorMarkers.map(sensor => (
+            <Marker
+              key={sensor.id}
+              coordinate={{ latitude: sensor.latitude, longitude: sensor.longitude }}
+              pinColor="#2563eb"
+            >
+              <Callout>
+                <View style={s.callout}>
+                  <Text style={s.calloutTitle}>📡 {sensor.name}</Text>
+                  <Text style={[s.calloutStatus, { color: '#2563eb' }]}>
+                    Water level: {sensor.waterLevelCm != null ? `${sensor.waterLevelCm > 0 ? '+' : ''}${sensor.waterLevelCm} cm` : 'N/A'}
+                  </Text>
+                  <Text style={s.calloutTime}>{sensor.updatedAt}</Text>
+                  <Text style={s.calloutCoords}>
+                    {sensor.latitude.toFixed(5)}, {sensor.longitude.toFixed(5)}
+                  </Text>
+                </View>
+              </Callout>
+            </Marker>
+          ))}
         </MapView>
       ) : (
-        <View style={s.webFallback}>
-          <Ionicons name="map-outline" size={48} color="#9ca3af" />
-          <Text style={s.webFallbackTitle}>Map View</Text>
-          <Text style={s.webFallbackText}>
-            The map is available on mobile devices only.{'\n'}Open this app in Expo Go on your phone to see the map.
-          </Text>
-          {sosMarkers.length > 0 && (
-            <View style={s.webAlertList}>
-              <Text style={s.webAlertListTitle}>Active SOS Alerts ({activeAlerts.length})</Text>
-              {sosMarkers.slice(0, 10).map(marker => (
-                <View key={marker.id} style={s.webAlertItem}>
-                  <View style={[s.webAlertDot, { backgroundColor: getStatusColor(marker.status === 'Sent' ? 1 : marker.status === 'Dispatched' ? 2 : 3) }]} />
-                  <View style={{ flex: 1 }}>
-                    <Text style={s.webAlertName}>{marker.userName}</Text>
-                    <Text style={s.webAlertInfo}>{marker.status} • {marker.latitude.toFixed(4)}, {marker.longitude.toFixed(4)}</Text>
-                  </View>
-                </View>
-              ))}
-            </View>
-          )}
+        // Web: real interactive Leaflet map (OSM base + OpenWeather precipitation)
+        <View style={s.map}>
+          <WebFloodMap
+            center={userLocation ?? { latitude: DEFAULT_REGION.latitude, longitude: DEFAULT_REGION.longitude }}
+            markers={[
+              ...sosMarkers.map(m => ({
+                id: m.id,
+                latitude: m.latitude,
+                longitude: m.longitude,
+                color: getStatusColor(m.status === 'Sent' ? 1 : m.status === 'Dispatched' ? 2 : m.status === 'Rescued' ? 3 : 0),
+                title: `🚨 ${m.userName}`,
+                status: m.status,
+              })),
+              ...sensorMarkers.map(sn => ({
+                id: sn.id,
+                latitude: sn.latitude,
+                longitude: sn.longitude,
+                color: '#2563eb',
+                title: `📡 ${sn.name}`,
+                status: sn.waterLevelCm != null ? `${sn.waterLevelCm > 0 ? '+' : ''}${sn.waterLevelCm} cm` : 'No reading',
+              })),
+            ]}
+            showRain={showRain}
+            owmKey={OWM_KEY}
+          />
         </View>
       )}
 
@@ -238,8 +380,8 @@ export default function MapScreen() {
           <Ionicons name="alert-circle" size={16} color={activeAlerts.length > 0 ? '#dc2626' : '#16a34a'} />
           <Text style={s.topBannerText}>
             {loading ? 'Loading...' : activeAlerts.length > 0
-              ? `${activeAlerts.length} active SOS alert${activeAlerts.length > 1 ? 's' : ''}`
-              : 'No active SOS alerts'}
+              ? `${activeAlerts.length} of your active SOS report${activeAlerts.length > 1 ? 's' : ''}`
+              : sosMarkers.length > 0 ? `${sosMarkers.length} of your SOS report${sosMarkers.length > 1 ? 's' : ''}` : 'No SOS reports from you'}
           </Text>
         </View>
         {refreshing && <ActivityIndicator size="small" color="#2563eb" />}
@@ -247,6 +389,13 @@ export default function MapScreen() {
 
       {/* Controls */}
       <View style={s.controls}>
+        <TouchableOpacity
+          style={[s.controlBtn, showRain && s.controlBtnActive]}
+          onPress={() => setShowRain(v => !v)}
+          activeOpacity={0.7}
+        >
+          <Ionicons name="rainy" size={20} color={showRain ? '#2563eb' : '#9ca3af'} />
+        </TouchableOpacity>
         <TouchableOpacity style={s.controlBtn} onPress={handleRefresh} activeOpacity={0.7}>
           <Ionicons name="refresh" size={20} color="#374151" />
         </TouchableOpacity>
@@ -257,7 +406,7 @@ export default function MapScreen() {
 
       {/* Legend */}
       <View style={s.legend}>
-        <Text style={s.legendTitle}>SOS Status</Text>
+        <Text style={s.legendTitle}>Your SOS Reports</Text>
         <View style={s.legendRow}>
           <View style={[s.legendDot, { backgroundColor: '#dc2626' }]} />
           <Text style={s.legendText}>Active</Text>
@@ -270,6 +419,16 @@ export default function MapScreen() {
           <View style={[s.legendDot, { backgroundColor: '#16a34a' }]} />
           <Text style={s.legendText}>Rescued</Text>
         </View>
+        <View style={[s.legendRow, { marginTop: 4 }]}>
+          <View style={[s.legendDot, { backgroundColor: '#2563eb' }]} />
+          <Text style={s.legendText}>Flood sensor</Text>
+        </View>
+        {showRain && OWM_KEY ? (
+          <View style={s.legendRow}>
+            <View style={[s.legendDot, { backgroundColor: '#38bdf8' }]} />
+            <Text style={s.legendText}>Rain (OpenWeather)</Text>
+          </View>
+        ) : null}
       </View>
 
       {/* Loading overlay */}
@@ -307,6 +466,7 @@ const s = StyleSheet.create({
     shadowColor: '#000', shadowOffset: { width: 0, height: 2 },
     shadowOpacity: 0.12, shadowRadius: 4, elevation: 4,
   },
+  controlBtnActive: { backgroundColor: '#eff6ff', borderWidth: 1.5, borderColor: '#bfdbfe' },
 
   legend: {
     position: 'absolute', bottom: 20, left: 14,

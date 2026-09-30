@@ -153,120 +153,83 @@ async function ensureUserProfileForSos(params: {
   const firstName = params.user.firstName?.trim() || 'Resident';
   const middleName = params.user.middleName?.trim() || '';
   const lastName = params.user.lastName?.trim() || 'User';
-  const fullName = `${firstName}${middleName ? ` ${middleName}` : ''} ${lastName}`.trim();
   const email = (params.authEmail || params.user.email || '').trim().toLowerCase();
 
   if (!email) {
     throw new Error('Authenticated user email is missing; cannot create SOS profile.');
   }
 
-  const payload = {
+  // The sos_alerts.user_id FK references the `users` table.
+  // Only send columns that actually exist in the real `users` schema:
+  // user_id, first_name, middle_name, last_name, email_address,
+  // contact_number, address_province, address_city, address_street, role_id, barangay_id
+  const payload: Record<string, any> = {
     user_id: params.authUserId,
     first_name: firstName,
     middle_name: middleName,
     last_name: lastName,
-    full_name: fullName,
-    email,
-    phone_number: params.user.phone?.trim() || '',
-    province: 'Cavite',
-    city: params.user.city?.trim() || '',
-    barangay: params.user.barangay?.trim() || '',
-    street: '',
-    role_id: params.user.roleId ?? null,
+    email_address: email,
+    contact_number: params.user.phone?.trim() || '',
+    address_province: 'Cavite',
+    address_city: params.user.city?.trim() || null,
+    address_street: '',
+    role_id: params.user.roleId ?? 1,
     barangay_id: params.user.barangayId ?? null,
-    fcm_token: params.user.fcmToken || '',
   };
 
-  // Keep users in sync for app profile reads.
   await upsertProfileRow('users', payload);
-
-  // FK on v_sos_alerts references v_users.user_id in this schema.
-  await upsertProfileRow('v_users', payload);
 }
+
+// Real sos_alerts schema: user_id (FK -> users), sos_status_id (NOT NULL),
+// situation_type_id, created_at, plus an auto integer primary key.
+// It has NO latitude/longitude columns, so we optimistically include them
+// and let the missing-column self-healing drop them if absent.
+const SOS_STATUS_PENDING = 1;
 
 async function insertSosAlert(params: {
   authUserId: string;
   latitude?: number;
   longitude?: number;
 }) {
-  const lat = params.latitude ?? 0;
-  const lng = params.longitude ?? 0;
+  const lat = params.latitude ?? null;
+  const lng = params.longitude ?? null;
 
-  const attempts: Array<{
-    table: string;
-    idColumn: string;
-    payload: Record<string, any>;
-  }> = [
-    {
-      table: 'sos_alerts',
-      idColumn: 'sos_id',
-      payload: {
-        user_id: params.authUserId,
-        latitude: lat,
-        longitude: lng,
-        status_id: 1,
-      },
-    },
-    {
-      table: 'sos_alerts',
-      idColumn: 'sos_id',
-      payload: {
-        user_id: params.authUserId,
-        status_id: 1,
-      },
-    },
-    {
-      table: 'v_sos_alerts',
-      idColumn: 'sos_id',
-      payload: {
-        user_id: params.authUserId,
-        latitude: lat,
-        longitude: lng,
-        status_id: 1,
-      },
-    },
-  ];
+  // Real columns: sos_alert_id (PK), user_id, gps_latitude, gps_longitude,
+  // situation_type_id, affected_people_count, sos_status_id, created_at.
+  const payload: Record<string, any> = {
+    user_id: params.authUserId,
+    sos_status_id: SOS_STATUS_PENDING,
+  };
+  if (lat !== null) payload.gps_latitude = lat;
+  if (lng !== null) payload.gps_longitude = lng;
 
   let lastError: any = null;
-  for (const attempt of attempts) {
-    const payload = { ...attempt.payload };
 
-    for (let i = 0; i < 8; i++) {
-      const { data, error } = await supabase
-        .from(attempt.table)
-        .insert(payload)
-        .select('*')
-        .maybeSingle();
+  for (let i = 0; i < 8; i++) {
+    const { data, error } = await supabase
+      .from('sos_alerts')
+      .insert(payload)
+      .select('*')
+      .maybeSingle();
 
-      if (!error) {
-        const dbId = (data as Record<string, any> | null)?.[attempt.idColumn] ?? (data as Record<string, any> | null)?.sos_id ?? null;
-        return {
-          table: attempt.table,
-          idColumn: attempt.idColumn,
-          id: dbId,
-        };
-      }
-
-      // Log detailed error for debugging
-      try {
-        console.error('Supabase insert error', { table: attempt.table, payload, error });
-      } catch (logErr) {
-        console.error('Failed to log supabase error', logErr);
-      }
-
-      const missingColumn = getMissingColumnName(error);
-      if (missingColumn && Object.prototype.hasOwnProperty.call(payload, missingColumn)) {
-        delete payload[missingColumn];
-        if (Object.keys(payload).length === 0) {
-          lastError = error;
-          break;
-        }
-        continue;
-      }
-
-      lastError = error;
-      break;
+    if (!error) {
+      const row = (data as Record<string, any> | null) ?? {};
+      const dbId = row.sos_alert_id ?? row.sos_id ?? row.id ?? null;
+      return { table: 'sos_alerts', idColumn: 'sos_alert_id', id: dbId };
     }
+
+    try {
+      console.error('[SOS] insert error', { payload, code: error.code, message: error.message });
+    } catch {}
+
+    const missingColumn = getMissingColumnName(error);
+    if (missingColumn && Object.prototype.hasOwnProperty.call(payload, missingColumn)) {
+      delete payload[missingColumn];
+      continue;
+    }
+
+    lastError = error;
+    break;
   }
 
   throw lastError ?? new Error('Unable to insert SOS alert into Supabase.');
@@ -324,35 +287,52 @@ async function updateSosAlert(
   const situationTypeId = mapSituationToTypeId(selectedSituation);
 
   const payload: Record<string, any> = {};
-  if (peopleCount !== null) payload.number_of_people = peopleCount;
+  if (peopleCount !== null) payload.affected_people_count = peopleCount;
   if (situationTypeId !== null) payload.situation_type_id = situationTypeId;
 
   if (Object.keys(payload).length === 0) return;
 
-  // Determine the sos_id to update
+  // Determine the id + the column name to match on.
   let sosId: string | number | null = null;
+  let idColumn = 'sos_alert_id';
 
   if (remoteRefOrId && typeof remoteRefOrId === 'object' && 'id' in remoteRefOrId) {
     sosId = remoteRefOrId.id;
-  } else if (typeof remoteRefOrId === 'string') {
-    sosId = remoteRefOrId;
+    idColumn = remoteRefOrId.idColumn || 'id';
+  } else if (typeof remoteRefOrId === 'string' || typeof remoteRefOrId === 'number') {
+    sosId = remoteRefOrId as any;
   }
 
-  if (!sosId) {
+  if (sosId === null || sosId === undefined) {
     throw new Error('No remote reference or ID provided for update.');
   }
 
-  const { data, error } = await supabase
-    .from('sos_alerts')
-    .update(payload)
-    .eq('sos_id', sosId)
-    .select('sos_id, number_of_people, situation_type_id');
+  const attempt = { ...payload };
+  let lastError: any = null;
 
-  console.log('[updateSosAlert] result:', { sosId, payload, data, error: error?.message });
+  for (let i = 0; i < 6; i++) {
+    const { data, error } = await supabase
+      .from('sos_alerts')
+      .update(attempt)
+      .eq(idColumn, sosId)
+      .select('*');
 
-  if (error) {
-    throw new Error(error.message);
+    console.log('[updateSosAlert] result:', { idColumn, sosId, attempt, ok: !error, error: error?.message });
+
+    if (!error) return;
+
+    const missingColumn = getMissingColumnName(error);
+    if (missingColumn && Object.prototype.hasOwnProperty.call(attempt, missingColumn)) {
+      delete attempt[missingColumn];
+      if (Object.keys(attempt).length === 0) return; // nothing left to update
+      continue;
+    }
+
+    lastError = error;
+    break;
   }
+
+  if (lastError) throw new Error(lastError.message);
 }
 
 export default function SOSScreen() {
