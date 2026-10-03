@@ -1,9 +1,5 @@
-import Constants from 'expo-constants';
 
-const GEMINI_API_KEY = 
-  process.env.EXPO_PUBLIC_GEMINI_API_KEY ||
-  (Constants.expoConfig?.extra as any)?.GEMINI_API_KEY ||
-  '';
+const GEMINI_API_KEY = process.env.EXPO_PUBLIC_GEMINI_API_KEY ?? '';
 
 export async function getGeminiInsight({ sensor, history, rainHistory, type = 'water' }: { sensor: any; history: any[]; rainHistory?: { label: string; value: number }[]; type?: 'water' | 'rainfall' }) {
   // Safety: ensure sensor and history have safe defaults

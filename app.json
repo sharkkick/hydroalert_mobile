@@ -36,7 +36,6 @@
       "favicon": "./assets/images/favicon.png"
     },
     "extra": {
-      "GEMINI_API_KEY": "AIzaSyAc-wT796h33MhoJaKTsm2Z2-GFiso_388",
       "eas": {
         "projectId": "hydroalert_mobile"
       }
